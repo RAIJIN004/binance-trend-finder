@@ -1,4 +1,4 @@
-# Binance MCP Server
+# Binance Trend Finder
 
 MCP server for scanning Binance markets to detect coins with sustained extensive 24h movements.
 

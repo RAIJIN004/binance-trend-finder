@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "binance-mcp-server"
+name = "binance-trend-finder"
 version = "1.0.0"
 description = "MCP server for scanning Binance markets with sustained extensive movements"
 readme = "README.md"

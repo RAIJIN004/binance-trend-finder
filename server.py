@@ -3,8 +3,8 @@ from scanner import scan_market, get_ticker_detail, get_klines_detailed, get_all
 from datetime import datetime
 
 mcp = FastMCP(
-    "binance-scanner",
-    description="Binance market scanner - detects coins with sustained extensive movements"
+    "binance-trend-finder",
+    description="Binance market scanner - detects coins with sustained extensive 24h movements"
 )
 
 @mcp.tool()
