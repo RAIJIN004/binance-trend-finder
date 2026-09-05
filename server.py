@@ -10,7 +10,9 @@ mcp = FastMCP(
 @mcp.tool()
 def scan_extensive_movements(
     min_volume: float = 5_000_000,
-    top_n: int = 20
+    top_n: int = 20,
+    min_atr_pct: float = 2.0,
+    interval: str = "1d"
 ) -> dict:
     """
     Scan Binance USDT pairs and find coins with sustained extensive 24h movements.
@@ -19,18 +21,30 @@ def scan_extensive_movements(
     Args:
         min_volume: Minimum 24h quote volume in USDT (default: 5M)
         top_n: Number of top results to return (default: 20)
+        min_atr_pct: Minimum ATR percentage to filter low volatility coins (default: 2.0)
+        interval: Kline interval for ATR calculation (default: 1d)
     
     Returns:
-        Dictionary with top coins ranked by movement streak and intensity
+        Dictionary with top coins ranked by ATR and movement streak
     """
-    results = scan_market(min_volume=min_volume, top_n=top_n)
+    results = scan_market(
+        min_volume=min_volume,
+        top_n=top_n,
+        min_atr_pct=min_atr_pct,
+        interval=interval
+    )
 
     return {
         "scan_time": datetime.utcnow().isoformat(),
+        "filters": {
+            "min_volume": min_volume,
+            "min_atr_pct": min_atr_pct,
+            "interval": interval
+        },
         "pairs_scanned": len(results),
         "top_coins": results,
         "summary": {
-            "best_streak": results[0] if results else None,
+            "best_atr": results[0] if results else None,
             "highest_avg": max(results, key=lambda x: x["avg_week"]) if results else None,
             "most_volatile_24h": max(results, key=lambda x: x["range_24h"]) if results else None
         }

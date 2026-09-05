@@ -32,6 +32,37 @@ def calc_daily_changes(klines: list) -> list:
         changes.append(round(pct, 2))
     return changes
 
+def calc_atr(klines: list, period: int = 14) -> dict:
+    if len(klines) < 2:
+        return {"atr": 0, "atr_pct": 0, "tr_values": []}
+
+    tr_values = []
+    for i in range(1, len(klines)):
+        high = float(klines[i][2])
+        low = float(klines[i][3])
+        prev_close = float(klines[i-1][4])
+
+        tr1 = high - low
+        tr2 = abs(high - prev_close)
+        tr3 = abs(low - prev_close)
+        tr = max(tr1, tr2, tr3)
+        tr_values.append(tr)
+
+    if not tr_values:
+        return {"atr": 0, "atr_pct": 0, "tr_values": []}
+
+    atr_period = min(period, len(tr_values))
+    atr = sum(tr_values[-atr_period:]) / atr_period
+
+    current_price = float(klines[-1][4])
+    atr_pct = (atr / current_price * 100) if current_price > 0 else 0
+
+    return {
+        "atr": round(atr, 6),
+        "atr_pct": round(atr_pct, 2),
+        "tr_values": [round(v, 6) for v in tr_values]
+    }
+
 def score_streak(changes: list, min_pct: float = 3.0) -> dict:
     if len(changes) < 2:
         return {"avg": 0, "streak": 0, "consecutive_big": 0, "positive_days": 0}
@@ -56,7 +87,12 @@ def score_streak(changes: list, min_pct: float = 3.0) -> dict:
         "positive_days": positive_days
     }
 
-def scan_market(min_volume: float = 5_000_000, top_n: int = 20) -> list:
+def scan_market(
+    min_volume: float = 5_000_000,
+    top_n: int = 20,
+    min_atr_pct: float = 0.0,
+    interval: str = "1d"
+) -> list:
     tickers = get_all_usdt_tickers(min_volume)
     results = []
     total = len(tickers)
@@ -70,11 +106,15 @@ def scan_market(min_volume: float = 5_000_000, top_n: int = 20) -> list:
         price = float(t["lastPrice"])
 
         try:
-            klines = get_klines(sym, "1d", 7)
+            klines = get_klines(sym, interval, 14)
             daily = calc_daily_changes(klines)
             score = score_streak(daily)
+            atr_data = calc_atr(klines, period=14)
 
             range_24h = ((high_24h - low_24h) / low_24h) * 100
+
+            if atr_data["atr_pct"] < min_atr_pct:
+                continue
 
             results.append({
                 "symbol": sym,
@@ -82,6 +122,8 @@ def scan_market(min_volume: float = 5_000_000, top_n: int = 20) -> list:
                 "pct_24h": round(pct_24h, 2),
                 "range_24h": round(range_24h, 2),
                 "volume_24h": round(vol, 0),
+                "atr": atr_data["atr"],
+                "atr_pct": atr_data["atr_pct"],
                 "avg_week": score["avg"],
                 "streak": score["streak"],
                 "days_above_threshold": score["consecutive_big"],
@@ -94,7 +136,7 @@ def scan_market(min_volume: float = 5_000_000, top_n: int = 20) -> list:
         if (i + 1) % 50 == 0:
             time.sleep(0.5)
 
-    results.sort(key=lambda x: (x["streak"], x["days_above_threshold"], x["avg_week"]), reverse=True)
+    results.sort(key=lambda x: (x["atr_pct"], x["streak"], x["avg_week"]), reverse=True)
     return results[:top_n]
 
 def get_ticker_detail(symbol: str) -> dict:
