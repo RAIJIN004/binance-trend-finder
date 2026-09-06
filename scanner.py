@@ -15,7 +15,7 @@ def get_all_usdt_tickers(min_volume: float = 5_000_000) -> list:
         and not any(x in d["symbol"] for x in ["UP", "DOWN", "BULL", "BEAR"])
     ]
 
-def get_klines(symbol: str, interval: str = "1d", limit: int = 7) -> list:
+def get_klines(symbol: str, interval: str = "1d", limit: int = 14) -> list:
     r = requests.get(
         f"{BASE_URL}/api/v3/klines",
         params={"symbol": symbol, "interval": interval, "limit": limit},
@@ -63,39 +63,57 @@ def calc_atr(klines: list, period: int = 14) -> dict:
         "tr_values": [round(v, 6) for v in tr_values]
     }
 
-def score_streak(changes: list, min_pct: float = 3.0) -> dict:
-    if len(changes) < 2:
-        return {"avg": 0, "streak": 0, "consecutive_big": 0, "positive_days": 0}
+def analyze_bullish_streak(daily_changes: list, klines: list) -> dict:
+    if not daily_changes or len(klines) < 2:
+        return {
+            "positive_streak": 0,
+            "positive_days": 0,
+            "negative_days": 0,
+            "net_change_pct": 0,
+            "avg_daily_change": 0,
+            "avg_positive_gain": 0
+        }
 
-    abs_changes = [abs(c) for c in changes]
-    avg = sum(abs_changes) / len(abs_changes)
-
-    streak = 0
-    for c in reversed(abs_changes):
-        if c >= avg * 0.7:
-            streak += 1
+    # Consecutive positive days from newest to oldest
+    pos_streak = 0
+    for c in reversed(daily_changes):
+        if c > 0:
+            pos_streak += 1
         else:
             break
 
-    consecutive_big = sum(1 for c in abs_changes if c >= min_pct)
-    positive_days = sum(1 for c in changes if c > 0)
+    pos_days = sum(1 for c in daily_changes if c > 0)
+    neg_days = sum(1 for c in daily_changes if c < 0)
+
+    first_open = float(klines[0][1])
+    last_close = float(klines[-1][4])
+    net_change = round(((last_close - first_open) / first_open) * 100, 2) if first_open > 0 else 0
+
+    avg_change = round(sum(daily_changes) / len(daily_changes), 2)
+    pos_gains = [c for c in daily_changes if c > 0]
+    avg_pos_gain = round(sum(pos_gains) / len(pos_gains), 2) if pos_gains else 0
 
     return {
-        "avg": round(avg, 2),
-        "streak": streak,
-        "consecutive_big": consecutive_big,
-        "positive_days": positive_days
+        "positive_streak": pos_streak,
+        "positive_days": pos_days,
+        "negative_days": neg_days,
+        "net_change_pct": net_change,
+        "avg_daily_change": avg_change,
+        "avg_positive_gain": avg_pos_gain
     }
 
 def scan_market(
     min_volume: float = 5_000_000,
     top_n: int = 20,
-    min_atr_pct: float = 0.0,
+    min_atr_pct: float = 2.0,
+    only_positive: bool = True,
+    min_positive_days: int = 4,
+    min_24h_pct: float = 0.0,
+    min_net_7d_pct: float = 0.0,
     interval: str = "1d"
 ) -> list:
     tickers = get_all_usdt_tickers(min_volume)
     results = []
-    total = len(tickers)
 
     for i, t in enumerate(tickers):
         sym = t["symbol"]
@@ -105,16 +123,33 @@ def scan_market(
         low_24h = float(t["lowPrice"])
         price = float(t["lastPrice"])
 
+        # Early filter: if user wants positive coins only, 24h must be >= threshold
+        if only_positive and pct_24h < min_24h_pct:
+            continue
+
         try:
             klines = get_klines(sym, interval, 14)
-            daily = calc_daily_changes(klines)
-            score = score_streak(daily)
+            if len(klines) < 8:
+                continue
+
+            # Analyze last 7 days + today for streak & net change
+            recent_klines = klines[-8:]
+            daily = calc_daily_changes(recent_klines)
+            streak_info = analyze_bullish_streak(daily, recent_klines)
             atr_data = calc_atr(klines, period=14)
 
-            range_24h = ((high_24h - low_24h) / low_24h) * 100
+            range_24h = ((high_24h - low_24h) / low_24h) * 100 if low_24h > 0 else 0
 
+            # Filter out flat / low-volatility coins
             if atr_data["atr_pct"] < min_atr_pct:
                 continue
+
+            # Bullish / Positive consistency filters
+            if only_positive:
+                if streak_info["net_change_pct"] < min_net_7d_pct:
+                    continue
+                if streak_info["positive_days"] < min_positive_days:
+                    continue
 
             results.append({
                 "symbol": sym,
@@ -124,19 +159,37 @@ def scan_market(
                 "volume_24h": round(vol, 0),
                 "atr": atr_data["atr"],
                 "atr_pct": atr_data["atr_pct"],
-                "avg_week": score["avg"],
-                "streak": score["streak"],
-                "days_above_threshold": score["consecutive_big"],
-                "positive_days": score["positive_days"],
-                "daily_changes": daily
+                "positive_streak": streak_info["positive_streak"],
+                "positive_days": f"{streak_info['positive_days']}/{len(daily)}",
+                "net_7d_pct": streak_info["net_change_pct"],
+                "avg_daily_change": streak_info["avg_daily_change"],
+                "avg_positive_gain": streak_info["avg_positive_gain"],
+                "daily_changes": daily[-7:]
             })
-        except Exception as e:
+        except Exception:
             continue
 
         if (i + 1) % 50 == 0:
             time.sleep(0.5)
 
-    results.sort(key=lambda x: (x["atr_pct"], x["streak"], x["avg_week"]), reverse=True)
+    # Sort primarily by:
+    # 1. positive streak (consecutive green days)
+    # 2. total positive days count
+    # 3. net 7-day performance
+    # 4. ATR volatility percentage
+    if only_positive:
+        results.sort(
+            key=lambda x: (
+                x["positive_streak"],
+                int(x["positive_days"].split("/")[0]),
+                x["net_7d_pct"],
+                x["atr_pct"]
+            ),
+            reverse=True
+        )
+    else:
+        results.sort(key=lambda x: (x["atr_pct"], x["pct_24h"]), reverse=True)
+
     return results[:top_n]
 
 def get_ticker_detail(symbol: str) -> dict:
@@ -144,16 +197,17 @@ def get_ticker_detail(symbol: str) -> dict:
     r.raise_for_status()
     return r.json()
 
-def get_klines_detailed(symbol: str, interval: str = "1d", limit: int = 7) -> list:
+def get_klines_detailed(symbol: str, interval: str = "1d", limit: int = 14) -> list:
     klines = get_klines(symbol, interval, limit)
     result = []
     for k in klines:
+        o, h, l, c, v = float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])
         result.append({
-            "open": float(k[1]),
-            "high": float(k[2]),
-            "low": float(k[3]),
-            "close": float(k[4]),
-            "volume": float(k[5]),
-            "change_pct": round(((float(k[4]) - float(k[1])) / float(k[1])) * 100, 2)
+            "open": o,
+            "high": h,
+            "low": l,
+            "close": c,
+            "volume": v,
+            "change_pct": round(((c - o) / o) * 100, 2) if o > 0 else 0
         })
     return result
