@@ -8,6 +8,7 @@ from scanner import (
     safety_verdict,
     entry_decision,
     confluence_decision,
+    approve_trade,
     calc_atr,
     calc_daily_changes,
     analyze_bullish_streak
@@ -203,6 +204,44 @@ def confluence_check(
     if not symbol.endswith("USDT"):
         symbol += "USDT"
     return confluence_decision(symbol, square_bias, square_note)
+
+@mcp.tool()
+def approve_trade_tool(
+    symbol: str,
+    side: str,
+    entry_price: float,
+    leverage: float,
+    stop_loss: float,
+    wallet_usdt: float,
+    quantity: float,
+    square_bias: str = "neutral",
+    square_note: str = ""
+) -> dict:
+    """
+    PUERTA FINAL TODO-EN-UNO antes de abrir CUALQUIER posición. La IA debe
+    llamarla con el trade EXACTO que pretende abrir y OBEDECER el resultado.
+
+    Valida en orden: confluencia ENTER + lado + tope de apalancamiento por
+    wallet + SL del lado correcto + SL antes que liquidación + SL fuera del
+    ruido + margen <=50% wallet. Además informa % de riesgo y qty para 2%.
+
+    Args:
+        symbol: Par, ej. 'RUNEUSDT'
+        side: 'LONG' o 'SHORT'
+        entry_price: Precio de entrada pretendido
+        leverage: Apalancamiento pretendido (tope automático según wallet)
+        stop_loss: Stop loss pretendido
+        wallet_usdt: Balance disponible en USDT (futuros)
+        quantity: Cantidad en unidades base
+        square_bias: 'bullish' | 'bearish' | 'neutral' (de binance-square)
+        square_note: Nota de 1 línea de Square
+
+    Returns:
+        APPROVED (luz verde matemática) o REJECTED (no abrir, con motivos).
+        REJECTED no admite apelación narrativa.
+    """
+    return approve_trade(symbol, side, entry_price, leverage, stop_loss,
+                         wallet_usdt, quantity, square_bias, square_note)
 
 if __name__ == "__main__":
     mcp.run()

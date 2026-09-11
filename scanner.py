@@ -55,6 +55,106 @@ def get_orderbook_bias(symbol: str, depth: int = 20) -> dict | None:
         "depth_levels": depth,
     }
 
+def _leverage_cap(wallet: float) -> int:
+    if wallet < 25:
+        return 10
+    if wallet < 100:
+        return 20
+    if wallet < 1000:
+        return 35
+    return 50
+
+def approve_trade(symbol: str, side: str, entry_price: float, leverage: float,
+                  stop_loss: float, wallet_usdt: float, quantity: float,
+                  square_bias: str = "neutral", square_note: str = "") -> dict:
+    """TODO EN UNO: puerta final antes de abrir. Corre confluencia + matemática
+    de riesgo. Solo devuelve APPROVED si TODO pasa; si no, REJECTED con motivos.
+    La IA no interpreta: obedece."""
+    sym = symbol.upper()
+    side = side.upper()
+    checks = []
+    fails = []
+
+    def check(name: str, ok: bool, detail: str):
+        checks.append({"check": name, "result": "PASS" if ok else "FAIL", "detail": detail})
+        if not ok:
+            fails.append(name)
+
+    # 1) Confluencia (momentum + orderbook + square)
+    conf = confluence_decision(sym, square_bias, square_note)
+    check("confluence_ENTER",
+          conf["final"] == "ENTER",
+          f"confluence={conf['final']} {conf['confluence_score']} vetoes={conf['vetoes'] or 'ninguno'}")
+
+    # 2) Lado válido
+    check("side_valido", side in ("LONG", "SHORT"), f"side={side}")
+
+    # 3) Tope de apalancamiento por wallet
+    cap = _leverage_cap(wallet_usdt)
+    check("leverage_cap",
+          leverage <= cap,
+          f"wallet ${wallet_usdt} → máx {cap}x, pedido {leverage}x")
+
+    # 4) SL del lado correcto y con distancia real
+    if side == "LONG":
+        sl_ok = stop_loss < entry_price
+    else:
+        sl_ok = stop_loss > entry_price
+    check("sl_lado_correcto", sl_ok,
+          f"entry={entry_price} sl={stop_loss} side={side}")
+    sl_dist_pct = abs(entry_price - stop_loss) / entry_price * 100 if entry_price > 0 else 0
+
+    # 5) Liquidación ANTES que el SL = suicidio (rechazo duro)
+    liq_dist_pct = (1 / leverage - 0.005) * 100 if leverage > 0 else 0
+    check("sl_antes_que_liquidacion",
+          sl_ok and sl_dist_pct < liq_dist_pct * 0.9,
+          f"SL a {sl_dist_pct:.2f}% vs liquidación estimada a ~{liq_dist_pct:.2f}% "
+          f"(con 10% colchón fees/slippage)")
+
+    # 6) SL fuera del ruido (≥1.5x rango promedio 15m)
+    noise_ok, noise_detail = False, "sin datos"
+    try:
+        ks = get_klines(sym, "15m", 17)
+        ranges = [(float(k[2]) - float(k[3])) / float(k[4]) * 100 for k in ks if float(k[4]) > 0]
+        avg_noise = sum(ranges) / len(ranges) if ranges else 0
+        noise_ok = sl_dist_pct >= avg_noise * 1.5
+        noise_detail = f"SL a {sl_dist_pct:.2f}% vs ruido 15m {avg_noise:.2f}% (mínimo 1.5x = {avg_noise*1.5:.2f}%)"
+    except Exception as e:
+        noise_detail = f"no se pudo medir ruido: {e}"
+    check("sl_fuera_del_ruido", noise_ok, noise_detail)
+
+    # 7) Margen usado ≤50% wallet (una operación no puede secuestrar la cuenta)
+    notional = quantity * entry_price
+    margin = notional / leverage if leverage > 0 else 0
+    check("margen_vs_wallet",
+          margin <= wallet_usdt * 0.5,
+          f"margen ${margin:.2f} vs 50% wallet ${wallet_usdt*0.5:.2f} "
+          f"(nocional ${notional:.2f} x{leverage})")
+
+    # 8) Riesgo % (informativo: WARN, no rechaza)
+    risk_usd = abs(entry_price - stop_loss) * quantity if sl_ok else notional
+    risk_pct = risk_usd / wallet_usdt * 100 if wallet_usdt > 0 else 999
+    risk_note = f"pérdida si toca SL: ${risk_usd:.2f} = {risk_pct:.1f}% wallet"
+    if risk_pct > 20:
+        risk_note += " (ALTO: >20%)"
+    qty_2pct = (wallet_usdt * 0.02) / abs(entry_price - stop_loss) if sl_ok and entry_price != stop_loss else 0
+
+    approved = not fails
+    return {
+        "symbol": sym,
+        "decision": "APPROVED" if approved else "REJECTED",
+        "trade": {"side": side, "entry": entry_price, "leverage": leverage,
+                  "stop": stop_loss, "qty": quantity, "notional": round(notional, 2),
+                  "wallet": wallet_usdt},
+        "checks": checks,
+        "failed": fails,
+        "risk_info": risk_note + f" | qty sugerida para riesgo 2%: {qty_2pct:.1f} unidades",
+        "confluence": {"final": conf["final"], "score": conf["confluence_score"],
+                       "pullback_plan": conf.get("pullback_plan")},
+        "scope": "APPROVED = luz verde matemática, NO garantía de ganancia. "
+                 "REJECTED = no abrir bajo ningún relato ('alineación parcial' incluida).",
+    }
+
 def confluence_decision(symbol: str, square_bias: str = "neutral",
                         square_note: str = "") -> dict:
     """Combina 3 fuentes con reglas FIJAS y vetos. Ninguna fuente decide sola:
