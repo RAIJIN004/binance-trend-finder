@@ -7,6 +7,7 @@ from scanner import (
     get_intraday_momentum,
     safety_verdict,
     entry_decision,
+    confluence_decision,
     calc_atr,
     calc_daily_changes,
     analyze_bullish_streak
@@ -61,6 +62,9 @@ def scan_extensive_movements(
     return {
         "scan_time": datetime.utcnow().isoformat() + "Z",
         "filter": "HYBRID: intraday gate (1h/4h/spike) + daily-streak ranking + safety verdict",
+        "scope": "SCREENER ONLY - momentum pre-filter, NOT a trade signal. "
+                 "Use confluence_check(symbol, square_bias) before risking capital. "
+                 "NEVER open on scanner verdict alone.",
         "filters_applied": {
             "only_positive": only_positive,
             "min_volume": min_volume,
@@ -168,6 +172,36 @@ def list_active_pairs(min_volume: float = 10_000_000) -> dict:
         "min_volume_filter": min_volume,
         "pairs": pairs
     }
+
+@mcp.tool()
+def confluence_check(
+    symbol: str,
+    square_bias: str = "neutral",
+    square_note: str = ""
+) -> dict:
+    """
+    DECISIÓN FINAL antes de operar: combina momentum + orderbook + Square con
+    reglas fijas y vetos. Esta es la ÚNICA tool que autoriza entradas.
+
+    Cómo usarla (la IA debe seguir este orden):
+    1. scan_extensive_movements para filtrar candidatas (screener, no señal).
+    2. Orderbook lo mide ESTA tool sola (imbalance cuantificado, sin narrativa).
+    3. Square/sentiment lo trae la IA con binance-square (square_hashtag) y lo
+       pasa como square_bias + square_note. Si no hay datos de Square, dejar neutral.
+
+    Args:
+        symbol: Par, ej. 'RAYUSDT'
+        square_bias: 'bullish' | 'bearish' | 'neutral' según posts recientes de Square
+        square_note: Resumen de 1 línea de lo visto en Square (ej. '3 posts whale accumulation')
+
+    Returns:
+        Veredicto FINAL ENTER/WAIT/AVOID con score /100, traza por fuente y vetos.
+        Si hay contradicción entre fuentes NO existe 'entrada parcial': es WAIT o AVOID.
+    """
+    symbol = symbol.upper()
+    if not symbol.endswith("USDT"):
+        symbol += "USDT"
+    return confluence_decision(symbol, square_bias, square_note)
 
 if __name__ == "__main__":
     mcp.run()

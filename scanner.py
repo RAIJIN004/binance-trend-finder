@@ -24,6 +24,132 @@ def get_klines(symbol: str, interval: str = "1d", limit: int = 14) -> list:
     r.raise_for_status()
     return r.json()
 
+def get_orderbook_bias(symbol: str, depth: int = 20) -> dict | None:
+    """Lee el orderbook público y devuelve sesgo cuantificado (no narrativa).
+    imbalance = (bids - asks) / (bids + asks) en top N niveles:
+    > +0.05 a favor comprador, < -0.05 a favor vendedor."""
+    try:
+        r = requests.get(f"{BASE_URL}/api/v3/depth",
+                         params={"symbol": symbol, "limit": min(max(depth, 5), 100)},
+                         timeout=10)
+        r.raise_for_status()
+        ob = r.json()
+    except Exception:
+        return None
+    bids = [(float(p), float(q)) for p, q in ob.get("bids", [])[:depth]]
+    asks = [(float(p), float(q)) for p, q in ob.get("asks", [])[:depth]]
+    if not bids or not asks:
+        return None
+    bid_vol = sum(p * q for p, q in bids)
+    ask_vol = sum(p * q for p, q in asks)
+    total = bid_vol + ask_vol
+    imb = (bid_vol - ask_vol) / total if total > 0 else 0
+    spread = (asks[0][0] - bids[0][0]) / bids[0][0] * 100 if bids[0][0] > 0 else 0
+    bias = "bullish" if imb >= 0.05 else ("bearish" if imb <= -0.05 else "neutral")
+    return {
+        "bias": bias,
+        "imbalance": round(imb, 3),
+        "spread_pct": round(spread, 3),
+        "bid_usdt": round(bid_vol, 0),
+        "ask_usdt": round(ask_vol, 0),
+        "depth_levels": depth,
+    }
+
+def confluence_decision(symbol: str, square_bias: str = "neutral",
+                        square_note: str = "") -> dict:
+    """Combina 3 fuentes con reglas FIJAS y vetos. Ninguna fuente decide sola:
+    - Momentum (scanner propio): 40 pts
+    - Orderbook (medido aquí, no interpretado): 35 pts
+    - Square/sentiment (lo aporta la IA, única entrada externa): 25 pts
+    Regla anti-narrativa: CUALQUIER contradicción fuerte = WAIT o AVOID.
+    No existen 'entradas por alineación parcial'."""
+    sym = symbol.upper()
+    problems = []
+    if not sym.replace("USDT", "").isalnum() or not sym.isascii():
+        problems.append("SÍMBOLO NO ESTÁNDAR: verifícalo en el exchange antes de operar")
+
+    # 1) Momentum (scanner propio, determinista)
+    intra = get_intraday_momentum(sym)
+    mom_entry, mom_score, mom_detail = "AVOID", 0, None
+    if intra is None:
+        mom_detail = "sin datos intradía"
+    else:
+        try:
+            ks = get_klines(sym, "1d", 8)
+            daily = calc_daily_changes(ks)
+            streak = analyze_bullish_streak(daily, ks)
+            t = get_ticker_detail(sym)
+            chg24 = float(t["priceChangePercent"])
+            sv = safety_verdict(chg24, intra["dist_from_4h_high_pct"])
+            ed = entry_decision(streak["positive_streak"], streak["net_change_pct"],
+                                chg24, intra["dist_from_4h_high_pct"], sv["verdict"])
+            mom_entry = ed["entry"]
+            mom_detail = {
+                "entry": ed["entry"], "size": ed["size"], "reason": ed["reason"],
+                "racha_d": streak["positive_streak"], "net_7d": streak["net_change_pct"],
+                "chg_1h": intra["chg_1h"], "chg_4h": intra["chg_4h"],
+                "spike": intra["vol_spike"], "chg_24h": round(chg24, 2),
+            }
+            mom_score = {"ENTER": 40, "WAIT": 20, "AVOID": 0}[ed["entry"]]
+        except Exception as e:
+            mom_detail = f"error momentum: {e}"
+
+    # 2) Orderbook (medido aquí)
+    ob = get_orderbook_bias(sym)
+    ob_score = 0
+    if ob is None:
+        ob_detail = "orderbook no disponible"
+    else:
+        imb = ob["imbalance"]
+        ob_score = 35 if imb >= 0.15 else (25 if imb >= 0.05 else (12 if imb > -0.05 else (5 if imb > -0.15 else 0)))
+        ob_detail = ob
+
+    # 3) Square (externo, lo trae la IA)
+    sq = (square_bias or "neutral").lower()
+    if sq not in ("bullish", "bearish", "neutral"):
+        sq = "neutral"
+    sq_score = {"bullish": 25, "neutral": 12, "bearish": 0}[sq]
+
+    score = mom_score + ob_score + sq_score
+
+    # VETOS (pisan el puntaje, sin excepción)
+    vetoes = []
+    if mom_entry == "AVOID":
+        vetoes.append("momentum AVOID: el scanner descarta la moneda")
+    if sq == "bearish":
+        vetoes.append("Square bearish: sentimiento en contra, máximo WAIT")
+    if isinstance(ob_detail, dict) and ob_detail["bias"] == "bearish" and mom_entry == "ENTER":
+        vetoes.append(f"orderbook en contra (imb={ob_detail['imbalance']}): momentum dice ENTER pero no hay bids que lo sostengan")
+    if isinstance(ob_detail, dict) and ob_detail["spread_pct"] > 0.30:
+        vetoes.append(f"spread {ob_detail['spread_pct']}%: impuesto microcap, no entrada a mercado")
+
+    if mom_entry == "WAIT":
+        vetoes.append("momentum WAIT (sin ENTER): orderbook y Square no pueden autorizar solas")
+    if vetoes or score < 70:
+        if mom_entry == "AVOID" or (sq == "bearish" and mom_entry != "ENTER"):
+            final, size = "AVOID", "0% - descartar"
+        else:
+            final, size = "WAIT", "0% - esperar"
+    else:
+        final, size = "ENTER", "100% - operar"
+
+    return {
+        "symbol": sym,
+        "final": final,
+        "suggested_size": size,
+        "confluence_score": f"{score}/100 (ENTER exige >=70 SIN vetos)",
+        "trace": {
+            "momentum_40": {"score": mom_score, "detail": mom_detail},
+            "orderbook_35": {"score": ob_score, "detail": ob_detail},
+            "square_25": {"bias": sq, "score": sq_score, "note": square_note},
+        },
+        "vetoes": vetoes,
+        "symbol_warnings": problems,
+        "scope": "Esta tool es la ÚNICA que autoriza entradas. El scanner solo filtra momentum; "
+                 "el orderbook solo mide liquidez; Square solo mide sentimiento. "
+                 "PROHIBIDO abrir posición por 'alineación parcial' si aquí sale WAIT/AVOID.",
+    }
+
 def calc_daily_changes(klines: list) -> list:
     changes = []
     for k in klines:
