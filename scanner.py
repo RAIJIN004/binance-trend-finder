@@ -664,9 +664,10 @@ def scan_market(
     )
     top = results[:top_n]
 
-    # TODO-EN-UNO: enriquecer SOLO el top con orderbook + confluencia base.
-    # Square queda neutral por defecto: la IA debe verificar square_hashtag y,
-    # si es bearish, degradar (regla en scope). 1 request extra por moneda top.
+    # TODO-EN-UNO: enriquecer SOLO el top con orderbook + confluencia base
+    # + MI CUENTA (posición y órdenes vivas por moneda). Square queda neutral
+    # por defecto: la IA debe verificar square_hashtag y, si es bearish,
+    # degradar (regla en scope).
     for c in top:
         ob = get_orderbook_bias(c["symbol"])
         if ob is None:
@@ -698,6 +699,46 @@ def scan_market(
             "square_assumed": "neutral (IA debe verificar square_hashtag; si bearish → WAIT/AVOID)",
         }
         time.sleep(0.03)
+
+    # MI CUENTA: posición + órdenes vivas por cada moneda del top (3 requests
+    # firmados en total, no por moneda). Sin keys → campos en null, sin error.
+    try:
+        pos = _signed_futures("GET", "/fapi/v3/positionRisk") or []
+        ords = _signed_futures("GET", "/fapi/v1/openOrders") or []
+        algos_raw = _signed_futures("GET", "/fapi/v1/openAlgoOrders")
+        algos = algos_raw if isinstance(algos_raw, list) else (algos_raw or {}).get("orders", [])
+        pos_by = {p.get("symbol"): p for p in pos if float(p.get("positionAmt", 0) or 0) != 0}
+        ord_by: dict = {}
+        for o in ords:
+            ord_by.setdefault(o.get("symbol"), {"regular": [], "algos": []})["regular"].append({
+                "id": o.get("orderId"), "type": o.get("type"), "side": o.get("side"),
+                "qty": o.get("origQty"), "stop": o.get("stopPrice") or o.get("activatePrice"),
+            })
+        for a in algos:
+            ord_by.setdefault(a.get("symbol"), {"regular": [], "algos": []})["algos"].append({
+                "id": a.get("algoId"), "type": a.get("orderType") or a.get("type"),
+                "side": a.get("side"), "trigger": a.get("triggerPrice"),
+                "activate": a.get("activatePrice"), "cb": a.get("callbackRate"),
+                "qty": a.get("quantity"),
+            })
+        for c in top:
+            p = pos_by.get(c["symbol"])
+            o = ord_by.get(c["symbol"], {"regular": [], "algos": []})
+            n_ord = len(o["regular"]) + len(o["algos"])
+            c["my_position"] = None if not p else {
+                "side": "LONG" if float(p["positionAmt"]) > 0 else "SHORT",
+                "amount": float(p["positionAmt"]),
+                "entry": float(p.get("entryPrice", 0) or 0),
+                "mark": float(p.get("markPrice", 0) or 0),
+                "pnl_usdt": round(float(p.get("unRealizedProfit", 0) or 0), 4),
+            }
+            c["my_orders"] = {"total": n_ord, **o}
+            c["already_involved"] = bool(p) or n_ord > 0
+    except Exception:
+        for c in top:
+            c["my_position"] = None
+            c["my_orders"] = {"total": 0, "regular": [], "algos": []}
+            c["already_involved"] = False
 
     return top
 

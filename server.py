@@ -38,10 +38,12 @@ def scan_extensive_movements(
     momentum (1h/4h/spike/streak/net7d) + entry signal + pullback plan +
     orderbook bias + confluence_base (final/score/vetoes, Square assumed neutral).
 
-    Pipeline: intraday GATE → daily-streak RANKING → orderbook + confluence
-    enrichment on the top only. The ONLY thing the AI must add externally is
-    Square sentiment: if square_hashtag is bearish, WAIT/AVOID overrides any
-    confluence_base ENTER. For opening: approve_trade_tool has the last word.
+    Pipeline: intraday GATE → daily-streak RANKING → orderbook + confluence +
+    MY ACCOUNT (my_position/my_orders/already_involved per coin) enrichment on
+    the top only. The ONLY thing the AI must add externally is Square sentiment:
+    if square_hashtag is bearish, WAIT/AVOID overrides any confluence_base ENTER.
+    If already_involved=true, prefer managing over opening (no duplicar posición).
+    For opening: approve_trade_tool has the last word.
 
     Args:
         min_volume: Minimum 24h quote volume in USDT (default: 5M)
