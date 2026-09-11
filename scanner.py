@@ -41,8 +41,12 @@ def get_open_positions() -> dict:
         entry = float(p.get("entryPrice", 0) or 0)
         mark = float(p.get("markPrice", 0) or 0)
         pnl = float(p.get("unRealizedProfit", 0) or 0)
-        lev = int(p.get("leverage", 0) or 0)
-        margin_base = abs(amt) * mark / lev if lev > 0 else 0
+        try:
+            lev = int(float(p.get("leverage", 0) or 0))
+        except (TypeError, ValueError):
+            lev = 0
+        notional = abs(amt) * mark
+        margin_base = notional / lev if lev > 0 else notional
         roe = pnl / margin_base * 100 if margin_base > 0 else 0
         total_pnl += pnl
         rows.append({
@@ -53,7 +57,9 @@ def get_open_positions() -> dict:
             "mark": mark,
             "pnl_usdt": round(pnl, 4),
             "roe_pct": round(roe, 2),
-            "leverage": f"{lev}x",
+            "roe_base": "margen" if lev > 0 else "nocional",
+            "leverage": f"{lev}x" if lev > 0 else str(p.get("leverage")),
+            "notional_usdt": round(notional, 2),
             "liq_price": p.get("liquidationPrice"),
             "margin_type": p.get("marginType"),
         })
