@@ -82,10 +82,11 @@ def confluence_decision(symbol: str, square_bias: str = "neutral",
             chg24 = float(t["priceChangePercent"])
             sv = safety_verdict(chg24, intra["dist_from_4h_high_pct"])
             ed = entry_decision(streak["positive_streak"], streak["net_change_pct"],
-                                chg24, intra["dist_from_4h_high_pct"], sv["verdict"])
+                                chg24, intra, sv["verdict"])
             mom_entry = ed["entry"]
             mom_detail = {
                 "entry": ed["entry"], "size": ed["size"], "reason": ed["reason"],
+                "wait_for_pullback": ed["wait_for_pullback"],
                 "racha_d": streak["positive_streak"], "net_7d": streak["net_change_pct"],
                 "chg_1h": intra["chg_1h"], "chg_4h": intra["chg_4h"],
                 "spike": intra["vol_spike"], "chg_24h": round(chg24, 2),
@@ -133,11 +134,16 @@ def confluence_decision(symbol: str, square_bias: str = "neutral",
     else:
         final, size = "ENTER", "100% - operar"
 
+    pullback_plan = None
+    if isinstance(mom_detail, dict):
+        pullback_plan = mom_detail.get("wait_for_pullback")
+
     return {
         "symbol": sym,
         "final": final,
         "suggested_size": size,
         "confluence_score": f"{score}/100 (ENTER exige >=70 SIN vetos)",
+        "pullback_plan": pullback_plan,
         "trace": {
             "momentum_40": {"score": mom_score, "detail": mom_detail},
             "orderbook_35": {"score": ob_score, "detail": ob_detail},
@@ -169,6 +175,7 @@ def get_intraday_momentum(symbol: str) -> dict | None:
         return None
     closes = [float(k[4]) for k in ks]
     highs = [float(k[2]) for k in ks]
+    lows = [float(k[3]) for k in ks]
     quote_vols = [float(k[5]) * float(k[4]) for k in ks]
     chg_1h = (closes[-1] / closes[-5] - 1) * 100 if closes[-5] > 0 else 0
     chg_4h = (closes[-1] / closes[0] - 1) * 100 if closes[0] > 0 else 0
@@ -176,14 +183,23 @@ def get_intraday_momentum(symbol: str) -> dict | None:
     spike = (sum(quote_vols[-4:]) / 4) / base_vol if base_vol > 0 else 0
     green_1h = sum(1 for i in range(-4, 0) if closes[i] > closes[i - 1])
     high_4h = max(highs)
-    dist_high = (high_4h - closes[-1]) / high_4h * 100 if high_4h > 0 else 0
+    price = closes[-1]
+    dist_high = (high_4h - price) / high_4h * 100 if high_4h > 0 else 0
+    # Plan de pullback: profundidad = mitad del rango de 1h (clamp 1%-5%).
+    range_1h = (max(highs[-4:]) - min(lows[-4:])) / price * 100 if price > 0 else 0
+    depth = min(5.0, max(1.0, range_1h / 2))
+    pullback_px = high_4h * (1 - depth / 100)
     return {
         "chg_1h": round(chg_1h, 2),
         "chg_4h": round(chg_4h, 2),
         "vol_spike": round(spike, 1),
         "green_candles_1h": f"{green_1h}/4",
         "dist_from_4h_high_pct": round(dist_high, 2),
-        "price": closes[-1],
+        "high_4h": high_4h,
+        "pullback_entry": round(pullback_px, 8),
+        "pullback_depth_pct": round(depth, 2),
+        "invalidate_above": round(high_4h * 1.005, 8),
+        "price": price,
     }
 
 def safety_verdict(chg_24h: float, dist_high: float) -> dict:
@@ -199,10 +215,12 @@ def safety_verdict(chg_24h: float, dist_high: float) -> dict:
     return {"verdict": verdict, "reasons": reasons}
 
 def entry_decision(streak_days: int, net_7d: float, chg_24h: float,
-                   dist_high: float, verdict: str) -> dict:
+                   intra: dict, verdict: str) -> dict:
     """Señal de entrada AUTOMATICA: impide entrar en picos y en monedas sin racha.
-    ENTER = operable ahora. WAIT = esperar retroceso/confirmación (tamaño 0).
-    AVOID = descartar (rebote de desplome, sobre-extendida, sin racha + extendida)."""
+    ENTER = operable ahora. WAIT = esperar (con nivel de pullback concreto si el
+    motivo es el pico). AVOID = descartar (rebote de desplome, sobre-extendida,
+    sin racha + extendida)."""
+    dist_high = (intra or {}).get("dist_from_4h_high_pct", 99.0)
     if verdict == "EVITAR" or net_7d < -20 or (streak_days <= 1 and chg_24h > 35):
         why = []
         if verdict == "EVITAR":
@@ -211,19 +229,32 @@ def entry_decision(streak_days: int, net_7d: float, chg_24h: float,
             why.append(f"rebote dentro de desplome semanal ({net_7d:+.1f}% 7d)")
         if streak_days <= 1 and chg_24h > 35:
             why.append("sin racha diaria + extendida (pump de una vela)")
-        return {"entry": "AVOID", "size": "0% - descartar", "reason": "; ".join(why)}
+        return {"entry": "AVOID", "size": "0% - descartar", "reason": "; ".join(why),
+                "wait_for_pullback": None}
     if verdict == "PRECAUCION" or streak_days <= 1 or dist_high < 0.5:
         why = []
-        if dist_high < 0.5:
-            why.append("comprarías en el pico exacto de 4h")
+        pullback = None
+        if dist_high < 0.5 and intra:
+            why.append(f"en el pico de 4h: esperar pullback a {intra['pullback_entry']} "
+                       f"(-{intra['pullback_depth_pct']}%)")
+            pullback = {
+                "pullback_entry": intra["pullback_entry"],
+                "depth_pct": intra["pullback_depth_pct"],
+                "high_4h": intra["high_4h"],
+                "invalidate_above": intra["invalidate_above"],
+                "note": "Orden límite en pullback_entry. Si rompe invalidate_above, "
+                        "el plan se cancela: re-evaluar (aplican reglas de chase).",
+            }
         if streak_days <= 1:
             why.append("sin racha diaria todavía (esperar confirmación)")
         if verdict == "PRECAUCION" and not why:
             why.append("veredicto PRECAUCION")
-        return {"entry": "WAIT", "size": "0% - esperar", "reason": "; ".join(why)}
+        return {"entry": "WAIT", "size": "0% - esperar", "reason": "; ".join(why),
+                "wait_for_pullback": pullback}
     size = "50% - mitad de tamaño" if chg_24h > 35 else "100% - tamaño completo"
     return {"entry": "ENTER", "size": size,
-            "reason": f"racha {streak_days}d + moviéndose ahora + fuera del pico"}
+            "reason": f"racha {streak_days}d + moviéndose ahora + fuera del pico",
+            "wait_for_pullback": None}
 
 def calc_atr(klines: list, period: int = 14) -> dict:
     if len(klines) < 2:
@@ -347,7 +378,7 @@ def scan_market(
             streak = analyze_bullish_streak(daily, ks)
             safety = safety_verdict(pct_24h, intra["dist_from_4h_high_pct"])
             entry = entry_decision(streak["positive_streak"], streak["net_change_pct"],
-                                   pct_24h, intra["dist_from_4h_high_pct"], safety["verdict"])
+                                   pct_24h, intra, safety["verdict"])
             results.append({
                 "symbol": sym,
                 "price": intra["price"],
@@ -366,6 +397,7 @@ def scan_market(
                 "entry": entry["entry"],
                 "suggested_size": entry["size"],
                 "entry_reason": entry["reason"],
+                "wait_for_pullback": entry["wait_for_pullback"],
             })
         except Exception:
             continue

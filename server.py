@@ -132,12 +132,13 @@ def get_coin_analysis(symbol: str) -> dict:
             streak_info["positive_streak"],
             streak_info["net_change_pct"],
             float(ticker["priceChangePercent"]),
-            (intraday or {}).get("dist_from_4h_high_pct", 99.0),
+            intraday,
             safety_verdict(
                 float(ticker["priceChangePercent"]),
                 (intraday or {}).get("dist_from_4h_high_pct", 99.0)
             )["verdict"]
-        ) if intraday else {"entry": "WAIT", "size": "0% - esperar", "reason": "sin datos intradía"},
+        ) if intraday else {"entry": "WAIT", "size": "0% - esperar",
+                            "reason": "sin datos intradía", "wait_for_pullback": None},
         "recent_daily_candles": klines_raw[-7:]
     }
 
