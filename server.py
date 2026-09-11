@@ -31,10 +31,14 @@ def scan_extensive_movements(
     only_positive: bool = True,
 ) -> dict:
     """
-    HYBRID scan of Binance USDT pairs:
-    1. Intraday GATE (moving right now: 1h + 4h + volume spike on 15m candles).
-    2. Daily-STREAK RANKING (consistency first) + SAFETY verdict per coin
-       (overextension / buying the exact 4h peak / negative 7d net = buried).
+    TODO-EN-UNO scan of Binance USDT pairs. Each coin in top_coins carries:
+    momentum (1h/4h/spike/streak/net7d) + entry signal + pullback plan +
+    orderbook bias + confluence_base (final/score/vetoes, Square assumed neutral).
+
+    Pipeline: intraday GATE → daily-streak RANKING → orderbook + confluence
+    enrichment on the top only. The ONLY thing the AI must add externally is
+    Square sentiment: if square_hashtag is bearish, WAIT/AVOID overrides any
+    confluence_base ENTER. For opening: approve_trade_tool has the last word.
 
     Args:
         min_volume: Minimum 24h quote volume in USDT (default: 5M)

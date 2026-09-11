@@ -510,8 +510,44 @@ def scan_market(
                        x["chg_1h"], x["net_7d_pct"], x["vol_spike"]),
         reverse=True
     )
+    top = results[:top_n]
 
-    return results[:top_n]
+    # TODO-EN-UNO: enriquecer SOLO el top con orderbook + confluencia base.
+    # Square queda neutral por defecto: la IA debe verificar square_hashtag y,
+    # si es bearish, degradar (regla en scope). 1 request extra por moneda top.
+    for c in top:
+        ob = get_orderbook_bias(c["symbol"])
+        if ob is None:
+            c["orderbook"] = {"bias": "unknown", "note": "orderbook no disponible"}
+            c["confluence_base"] = {"final": c["entry"], "score": "n/a",
+                                    "note": "sin orderbook: vale la señal momentum"}
+            continue
+        imb = ob["imbalance"]
+        ob_pts = 35 if imb >= 0.15 else (25 if imb >= 0.05 else (12 if imb > -0.05 else (5 if imb > -0.15 else 0)))
+        mom_pts = {"ENTER": 40, "WAIT": 20, "AVOID": 0}.get(c["entry"], 0)
+        score = mom_pts + ob_pts + 12  # Square neutral = 12
+        vetoes = []
+        if c["entry"] == "AVOID":
+            vetoes.append("momentum AVOID")
+        if c["entry"] == "WAIT":
+            vetoes.append("momentum WAIT: falta ENTER de momentum")
+        if ob["bias"] == "bearish" and c["entry"] == "ENTER":
+            vetoes.append(f"orderbook en contra (imb={imb})")
+        if ob["spread_pct"] > 0.30:
+            vetoes.append(f"spread {ob['spread_pct']}%")
+        if vetoes or score < 70:
+            final = "AVOID" if c["entry"] == "AVOID" else "WAIT"
+        else:
+            final = "ENTER"
+        c["orderbook"] = ob
+        c["confluence_base"] = {
+            "final": final, "score": f"{score}/100",
+            "vetoes": vetoes,
+            "square_assumed": "neutral (IA debe verificar square_hashtag; si bearish → WAIT/AVOID)",
+        }
+        time.sleep(0.03)
+
+    return top
 
 def get_ticker_detail(symbol: str) -> dict:
     r = requests.get(f"{BASE_URL}/api/v3/ticker/24hr", params={"symbol": symbol}, timeout=10)
