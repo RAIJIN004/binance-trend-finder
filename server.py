@@ -9,6 +9,8 @@ from scanner import (
     entry_decision,
     confluence_decision,
     approve_trade,
+    get_open_positions,
+    get_open_orders,
     calc_atr,
     calc_daily_changes,
     analyze_bullish_streak
@@ -74,6 +76,9 @@ def scan_extensive_movements(
         "scope": "SCREENER ONLY - momentum pre-filter, NOT a trade signal. "
                  "Use confluence_check(symbol, square_bias) before risking capital. "
                  "NEVER open on scanner verdict alone.",
+        "disclaimer": "ESTO NO ES ASESORÍA FINANCIERA. Haz tu propio análisis (DYOR): "
+                      "antes de operar alinea Square (square_hashtag) con la confluencia "
+                      "del MCP — los 2 deben apuntar al mismo lado; si discrepan, no operes.",
         "filters_applied": {
             "only_positive": only_positive,
             "min_volume": min_volume,
@@ -251,6 +256,25 @@ def approve_trade_tool(
     """
     return approve_trade(symbol, side, entry_price, leverage, stop_loss,
                          wallet_usdt, quantity, square_bias, square_note)
+
+@mcp.tool()
+def show_positions() -> dict:
+    """
+    Muestra las posiciones ABIERTAS en futuros REAL con PnL no realizado, ROE%,
+    entrada, mark, apalancamiento y liquidación. Si no hay ninguna, lo dice.
+    Solo lectura (no abre/cierra nada). Requiere BINANCE_API_KEY/SECRET en el env.
+    """
+    return get_open_positions()
+
+@mcp.tool()
+def show_orders() -> dict:
+    """
+    Muestra TODAS las órdenes vivas en futuros REAL: regulares + algo (TP/SL/trailing),
+    agrupadas por símbolo. Marca HUÉRFANAS las de símbolos SIN posición abierta
+    (la IA a veces no limpia: estas son candidatas a cancel_all_algos del helper).
+    Solo lectura. Requiere BINANCE_API_KEY/SECRET en el env.
+    """
+    return get_open_orders()
 
 if __name__ == "__main__":
     mcp.run()

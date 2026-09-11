@@ -1,8 +1,131 @@
+import hashlib
+import hmac
+import os
 import requests
 import time
+import urllib.parse
 from datetime import datetime
 
 BASE_URL = "https://api.binance.com"
+FUTURES_BASE = os.environ.get("BINANCE_FUTURES_BASE_URL", "https://fapi.binance.com")
+
+def _signed_futures(method: str, path: str, params: dict | None = None) -> dict | list:
+    """GET firmado a Futures. Solo lectura. Requiere BINANCE_API_KEY/SECRET en env."""
+    key = os.environ.get("BINANCE_API_KEY", "")
+    sec = os.environ.get("BINANCE_API_SECRET", "")
+    if not key or not sec:
+        raise RuntimeError("Sin BINANCE_API_KEY/SECRET: agrega el env al MCP en Hermes para ver posiciones.")
+    params = dict(params or {})
+    try:
+        server_t = requests.get(f"{FUTURES_BASE}/fapi/v1/time", timeout=10).json()["serverTime"]
+        params["timestamp"] = server_t
+    except Exception:
+        params["timestamp"] = int(time.time() * 1000)
+    params["recvWindow"] = "30000"
+    qs = urllib.parse.urlencode(params)
+    params["signature"] = hmac.new(sec.encode(), qs.encode(), hashlib.sha256).hexdigest()
+    r = requests.request(method, f"{FUTURES_BASE}{path}", params=params,
+                         headers={"X-MBX-APIKEY": key}, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+def get_open_positions() -> dict:
+    """Posiciones abiertas en futuros con PnL. Vacío si no hay ninguna."""
+    data = _signed_futures("GET", "/fapi/v3/positionRisk")
+    rows = []
+    total_pnl = 0.0
+    for p in data or []:
+        amt = float(p.get("positionAmt", 0) or 0)
+        if amt == 0:
+            continue
+        entry = float(p.get("entryPrice", 0) or 0)
+        mark = float(p.get("markPrice", 0) or 0)
+        pnl = float(p.get("unRealizedProfit", 0) or 0)
+        lev = int(p.get("leverage", 0) or 0)
+        margin_base = abs(amt) * mark / lev if lev > 0 else 0
+        roe = pnl / margin_base * 100 if margin_base > 0 else 0
+        total_pnl += pnl
+        rows.append({
+            "symbol": p.get("symbol"),
+            "side": "LONG" if amt > 0 else "SHORT",
+            "amount": amt,
+            "entry": entry,
+            "mark": mark,
+            "pnl_usdt": round(pnl, 4),
+            "roe_pct": round(roe, 2),
+            "leverage": f"{lev}x",
+            "liq_price": p.get("liquidationPrice"),
+            "margin_type": p.get("marginType"),
+        })
+    rows.sort(key=lambda x: x["pnl_usdt"])
+    return {
+        "count": len(rows),
+        "total_pnl_usdt": round(total_pnl, 4),
+        "positions": rows,
+        "note": "Sin posiciones abiertas." if not rows else f"{len(rows)} posición(es) abierta(s).",
+    }
+
+def get_open_orders() -> dict:
+    """Todas las órdenes vivas: regulares + algo (TP/SL/trailing).
+    Marca HUÉRFANAS las de símbolos SIN posición abierta (candidatas a limpieza,
+    la IA a veces no las cancela). Solo lectura."""
+    orders = _signed_futures("GET", "/fapi/v1/openOrders") or []
+    algos_raw = _signed_futures("GET", "/fapi/v1/openAlgoOrders")
+    algos = algos_raw if isinstance(algos_raw, list) else (algos_raw or {}).get("orders", [])
+    pos = _signed_futures("GET", "/fapi/v3/positionRisk") or []
+    pos_syms = {p.get("symbol") for p in pos if float(p.get("positionAmt", 0) or 0) != 0}
+
+    by_symbol: dict = {}
+
+    def bucket(sym: str) -> dict:
+        return by_symbol.setdefault(sym, {"symbol": sym, "has_position": sym in pos_syms,
+                                          "regular": [], "algos": []})
+
+    for o in orders:
+        b = bucket(o.get("symbol"))
+        b["regular"].append({
+            "orderId": o.get("orderId"),
+            "type": o.get("type"),
+            "side": o.get("side"),
+            "price": o.get("price"),
+            "stopPrice": o.get("stopPrice"),
+            "activatePrice": o.get("activatePrice"),
+            "callbackRate": o.get("callbackRate"),
+            "origQty": o.get("origQty"),
+            "status": o.get("status"),
+        })
+    for a in algos:
+        b = bucket(a.get("symbol"))
+        b["algos"].append({
+            "algoId": a.get("algoId"),
+            "orderType": a.get("orderType") or a.get("type"),
+            "side": a.get("side"),
+            "triggerPrice": a.get("triggerPrice"),
+            "activatePrice": a.get("activatePrice"),
+            "callbackRate": a.get("callbackRate"),
+            "quantity": a.get("quantity"),
+            "status": a.get("algoStatus") or a.get("status"),
+        })
+
+    symbols = []
+    orphans = []
+    for sym, b in sorted(by_symbol.items()):
+        n = len(b["regular"]) + len(b["algos"])
+        b["total"] = n
+        b["orphan"] = not b["has_position"]
+        if b["orphan"]:
+            orphans.append(sym)
+        symbols.append(b)
+
+    return {
+        "symbols_with_orders": len(symbols),
+        "total_regular": sum(len(b["regular"]) for b in symbols),
+        "total_algos": sum(len(b["algos"]) for b in symbols),
+        "orphan_symbols": orphans,
+        "cleanup_hint": ("Limpieza sugerida con cancel_all_algos del helper para: " + ", ".join(orphans)
+                         if orphans else "Nada huérfano."),
+        "by_symbol": symbols,
+    }
 
 def get_all_usdt_tickers(min_volume: float = 5_000_000) -> list:
     r = requests.get(f"{BASE_URL}/api/v3/ticker/24hr", timeout=15)
@@ -153,6 +276,8 @@ def approve_trade(symbol: str, side: str, entry_price: float, leverage: float,
                        "pullback_plan": conf.get("pullback_plan")},
         "scope": "APPROVED = luz verde matemática, NO garantía de ganancia. "
                  "REJECTED = no abrir bajo ningún relato ('alineación parcial' incluida).",
+        "disclaimer": "NO ES ASESORÍA FINANCIERA. Revisa el trade por tu cuenta (DYOR) "
+                      "aunque salga APPROVED: el mercado siempre puede invalidarlo.",
     }
 
 def confluence_decision(symbol: str, square_bias: str = "neutral",
@@ -254,6 +379,8 @@ def confluence_decision(symbol: str, square_bias: str = "neutral",
         "scope": "Esta tool es la ÚNICA que autoriza entradas. El scanner solo filtra momentum; "
                  "el orderbook solo mide liquidez; Square solo mide sentimiento. "
                  "PROHIBIDO abrir posición por 'alineación parcial' si aquí sale WAIT/AVOID.",
+        "disclaimer": "NO ES ASESORÍA FINANCIERA. Verifica por tu cuenta (DYOR): Square y "
+                      "confluencia alineados al mismo lado o no hay trade.",
     }
 
 def calc_daily_changes(klines: list) -> list:
