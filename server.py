@@ -27,9 +27,10 @@ def scan_extensive_movements(
     only_positive: bool = True,
 ) -> dict:
     """
-    Scan Binance USDT pairs for coins moving RIGHT NOW (intraday filter).
-    Replaces the old daily-ATR filter: uses 1h change + 4h change + volume spike
-    on 15m candles, so dead-today coins never reach the top.
+    HYBRID scan of Binance USDT pairs:
+    1. Intraday GATE (moving right now: 1h + 4h + volume spike on 15m candles).
+    2. Daily-STREAK RANKING (consistency first) + SAFETY verdict per coin
+       (overextension / buying the exact 4h peak / negative 7d net = buried).
 
     Args:
         min_volume: Minimum 24h quote volume in USDT (default: 5M)
@@ -41,7 +42,8 @@ def scan_extensive_movements(
         only_positive: If True, only rising coins (default: True)
 
     Returns:
-        Dictionary with live movers ranked by 1h gain, volume spike, 4h gain
+        Dictionary with hybrid-ranked movers (streak > 1h > net7d > spike),
+        each with verdict OK/PRECAUCION/EVITAR
     """
     results = scan_market(
         min_volume=min_volume,
@@ -55,7 +57,7 @@ def scan_extensive_movements(
 
     return {
         "scan_time": datetime.utcnow().isoformat() + "Z",
-        "filter": "INTRADAY (1h/4h/spike) - daily ATR no longer filters",
+        "filter": "HYBRID: intraday gate (1h/4h/spike) + daily-streak ranking + safety verdict",
         "filters_applied": {
             "only_positive": only_positive,
             "min_volume": min_volume,
@@ -67,9 +69,9 @@ def scan_extensive_movements(
         "pairs_matched": len(results),
         "top_coins": results,
         "summary": {
-            "hottest_now": results[0] if results else None,
-            "highest_4h": max(results, key=lambda x: x["chg_4h"]) if results else None,
-            "highest_spike": max(results, key=lambda x: x["vol_spike"]) if results else None
+            "top_pick": results[0] if results else None,
+            "safest_high_streak": next((c for c in results if c["verdict"] == "OK" and c["positive_streak_days"] >= 3), None),
+            "flagged": [c["symbol"] for c in results if c["verdict"] != "OK"]
         }
     }
 

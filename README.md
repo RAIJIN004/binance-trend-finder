@@ -1,13 +1,12 @@
 # Binance Trend Finder (MCP Server)
 
-MCP server for scanning Binance markets to detect coins with **sustained positive upward momentum**, continuous green streaks, and high ATR volatility (filtering out misleading bleeding/dumping coins).
+MCP server for scanning Binance markets to detect coins **moving RIGHT NOW with consistency**: hybrid filter (intraday gate + daily-streak ranking + safety verdict).
 
-## Key Improvements
+## Filtro HIBRIDO (reemplaza al ATR diario)
 
-- **Filtro de Momentum Positivo (`only_positive=True`)**: Descarta monedas engañosas que caen continuamente. Solo selecciona activos en tendencia alcista genuina.
-- **Racha Verde (`positive_streak`)**: Cuenta días consecutivos cerrando en verde hasta el día de hoy.
-- **Filtro de Consistencia (`positive_days >= 4/8`)**: Exige mayoría de velas alcistas en la semana y ganancia neta semanal positiva (`net_7d_pct > 0`).
-- **Filtro de Volatilidad Real (`min_atr_pct >= 2.0%`)**: Evita monedas planas o monedas estables (como PAXG o stablecoins), asegurando rango operable.
+1. **Puerta intradía** — 1h≥1.5% + 4h≥2% + spike volumen≥1x (velas 15m): solo pasa lo que se mueve AHORA. El ATR diario quedó como dato informativo.
+2. **Ranking por racha diaria** — consistencia primero (racha > 1h > neto7d > spike). El neto 7d negativo hunde los rebotes de desplome al fondo.
+3. **Veredicto de seguridad** — `OK` / `PRECAUCION` (sobre-extendida +35%, en el pico de 4h) / `EVITAR` (+80% en 24h).
 
 ## Installation
 

@@ -42,19 +42,35 @@ def get_intraday_momentum(symbol: str) -> dict | None:
     if len(ks) < 17:
         return None
     closes = [float(k[4]) for k in ks]
+    highs = [float(k[2]) for k in ks]
     quote_vols = [float(k[5]) * float(k[4]) for k in ks]
     chg_1h = (closes[-1] / closes[-5] - 1) * 100 if closes[-5] > 0 else 0
     chg_4h = (closes[-1] / closes[0] - 1) * 100 if closes[0] > 0 else 0
     base_vol = sum(quote_vols[:-4]) / 13
     spike = (sum(quote_vols[-4:]) / 4) / base_vol if base_vol > 0 else 0
     green_1h = sum(1 for i in range(-4, 0) if closes[i] > closes[i - 1])
+    high_4h = max(highs)
+    dist_high = (high_4h - closes[-1]) / high_4h * 100 if high_4h > 0 else 0
     return {
         "chg_1h": round(chg_1h, 2),
         "chg_4h": round(chg_4h, 2),
         "vol_spike": round(spike, 1),
         "green_candles_1h": f"{green_1h}/4",
+        "dist_from_4h_high_pct": round(dist_high, 2),
         "price": closes[-1],
     }
+
+def safety_verdict(chg_24h: float, dist_high: float) -> dict:
+    """Capa de seguridad: marca chase-riesgo y compras en el pico exacto."""
+    reasons = []
+    if chg_24h > 80:
+        reasons.append(f"sobre-extendida 24h={chg_24h:.0f}% (riesgo de chase)")
+    elif chg_24h > 35:
+        reasons.append(f"extendida 24h={chg_24h:.0f}% (entrar con mitad de tamaño)")
+    if dist_high < 0.5:
+        reasons.append("en el pico de 4h (esperar retroceso, no entrada a mercado)")
+    verdict = "EVITAR" if chg_24h > 80 else ("PRECAUCION" if reasons else "OK")
+    return {"verdict": verdict, "reasons": reasons}
 
 def calc_atr(klines: list, period: int = 14) -> dict:
     if len(klines) < 2:
@@ -135,11 +151,13 @@ def scan_market(
     min_24h_pct: float = 0.0,
     only_positive: bool = True,
 ) -> list:
-    """Filtro INTRADIA (reemplaza al ATR diario): solo monedas moviéndose AHORA.
-    1 request (15m x17) por moneda. El ATR diario quedó como dato informativo
-    en get_coin_analysis, ya no filtra."""
+    """HIBRIDO en 2 etapas:
+    1. PUERTA intradía (1 request 15m x17 por moneda): solo lo que se mueve AHORA.
+    2. RANKING por racha diaria (1 request 1d x8 solo para las que pasan):
+       consistencia primero, velocidad después. Neto 7d negativo hunde rebotes
+       de desplome al fondo. Incluye veredicto de seguridad por moneda."""
     tickers = get_all_usdt_tickers(min_volume)
-    results = []
+    gated = []
 
     for i, t in enumerate(tickers):
         sym = t["symbol"]
@@ -161,22 +179,45 @@ def scan_market(
         if intra["vol_spike"] < min_vol_spike:
             continue
 
-        results.append({
-            "symbol": sym,
-            "price": intra["price"],
-            "chg_1h": intra["chg_1h"],
-            "chg_4h": intra["chg_4h"],
-            "vol_spike": intra["vol_spike"],
-            "green_candles_1h": intra["green_candles_1h"],
-            "pct_24h": round(pct_24h, 2),
-            "volume_24h": round(vol, 0),
-        })
+        gated.append((sym, pct_24h, vol, intra))
 
         if (i + 1) % 50 == 0:
             time.sleep(0.5)
 
-    # Orden: 1h, spike de volumen, 4h
-    results.sort(key=lambda x: (x["chg_1h"], x["vol_spike"], x["chg_4h"]), reverse=True)
+    results = []
+    for sym, pct_24h, vol, intra in gated:
+        try:
+            ks = get_klines(sym, "1d", 8)
+            if len(ks) < 8:
+                continue
+            daily = calc_daily_changes(ks)
+            streak = analyze_bullish_streak(daily, ks)
+            safety = safety_verdict(pct_24h, intra["dist_from_4h_high_pct"])
+            results.append({
+                "symbol": sym,
+                "price": intra["price"],
+                "chg_1h": intra["chg_1h"],
+                "chg_4h": intra["chg_4h"],
+                "vol_spike": intra["vol_spike"],
+                "green_candles_1h": intra["green_candles_1h"],
+                "dist_from_4h_high_pct": intra["dist_from_4h_high_pct"],
+                "pct_24h": round(pct_24h, 2),
+                "volume_24h": round(vol, 0),
+                "positive_streak_days": streak["positive_streak"],
+                "green_days_8": f"{streak['positive_days']}/8",
+                "net_7d_pct": streak["net_change_pct"],
+                "verdict": safety["verdict"],
+                "warnings": safety["reasons"],
+            })
+        except Exception:
+            continue
+        time.sleep(0.03)
+
+    # Orden híbrido: racha diaria > 1h > neto 7d > spike
+    results.sort(
+        key=lambda x: (x["positive_streak_days"], x["chg_1h"], x["net_7d_pct"], x["vol_spike"]),
+        reverse=True
+    )
 
     return results[:top_n]
 
