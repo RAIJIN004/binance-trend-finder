@@ -72,6 +72,33 @@ def safety_verdict(chg_24h: float, dist_high: float) -> dict:
     verdict = "EVITAR" if chg_24h > 80 else ("PRECAUCION" if reasons else "OK")
     return {"verdict": verdict, "reasons": reasons}
 
+def entry_decision(streak_days: int, net_7d: float, chg_24h: float,
+                   dist_high: float, verdict: str) -> dict:
+    """Señal de entrada AUTOMATICA: impide entrar en picos y en monedas sin racha.
+    ENTER = operable ahora. WAIT = esperar retroceso/confirmación (tamaño 0).
+    AVOID = descartar (rebote de desplome, sobre-extendida, sin racha + extendida)."""
+    if verdict == "EVITAR" or net_7d < -20 or (streak_days <= 1 and chg_24h > 35):
+        why = []
+        if verdict == "EVITAR":
+            why.append("sobre-extendida (+80% 24h)")
+        if net_7d < -20:
+            why.append(f"rebote dentro de desplome semanal ({net_7d:+.1f}% 7d)")
+        if streak_days <= 1 and chg_24h > 35:
+            why.append("sin racha diaria + extendida (pump de una vela)")
+        return {"entry": "AVOID", "size": "0% - descartar", "reason": "; ".join(why)}
+    if verdict == "PRECAUCION" or streak_days <= 1 or dist_high < 0.5:
+        why = []
+        if dist_high < 0.5:
+            why.append("comprarías en el pico exacto de 4h")
+        if streak_days <= 1:
+            why.append("sin racha diaria todavía (esperar confirmación)")
+        if verdict == "PRECAUCION" and not why:
+            why.append("veredicto PRECAUCION")
+        return {"entry": "WAIT", "size": "0% - esperar", "reason": "; ".join(why)}
+    size = "50% - mitad de tamaño" if chg_24h > 35 else "100% - tamaño completo"
+    return {"entry": "ENTER", "size": size,
+            "reason": f"racha {streak_days}d + moviéndose ahora + fuera del pico"}
+
 def calc_atr(klines: list, period: int = 14) -> dict:
     if len(klines) < 2:
         return {"atr": 0, "atr_pct": 0, "tr_values": []}
@@ -193,6 +220,8 @@ def scan_market(
             daily = calc_daily_changes(ks)
             streak = analyze_bullish_streak(daily, ks)
             safety = safety_verdict(pct_24h, intra["dist_from_4h_high_pct"])
+            entry = entry_decision(streak["positive_streak"], streak["net_change_pct"],
+                                   pct_24h, intra["dist_from_4h_high_pct"], safety["verdict"])
             results.append({
                 "symbol": sym,
                 "price": intra["price"],
@@ -208,14 +237,19 @@ def scan_market(
                 "net_7d_pct": streak["net_change_pct"],
                 "verdict": safety["verdict"],
                 "warnings": safety["reasons"],
+                "entry": entry["entry"],
+                "suggested_size": entry["size"],
+                "entry_reason": entry["reason"],
             })
         except Exception:
             continue
         time.sleep(0.03)
 
-    # Orden híbrido: racha diaria > 1h > neto 7d > spike
+    # Orden: señal de entrada primero (ENTER > WAIT > AVOID), luego híbrido clásico
+    rank = {"ENTER": 2, "WAIT": 1, "AVOID": 0}
     results.sort(
-        key=lambda x: (x["positive_streak_days"], x["chg_1h"], x["net_7d_pct"], x["vol_spike"]),
+        key=lambda x: (rank.get(x["entry"], 0), x["positive_streak_days"],
+                       x["chg_1h"], x["net_7d_pct"], x["vol_spike"]),
         reverse=True
     )
 

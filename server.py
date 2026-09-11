@@ -5,6 +5,8 @@ from scanner import (
     get_klines_detailed,
     get_all_usdt_tickers,
     get_intraday_momentum,
+    safety_verdict,
+    entry_decision,
     calc_atr,
     calc_daily_changes,
     analyze_bullish_streak
@@ -42,8 +44,9 @@ def scan_extensive_movements(
         only_positive: If True, only rising coins (default: True)
 
     Returns:
-        Dictionary with hybrid-ranked movers (streak > 1h > net7d > spike),
-        each with verdict OK/PRECAUCION/EVITAR
+        Dictionary with hybrid-ranked movers. Every coin carries an automatic
+        ENTRY SIGNAL: ENTER (operable now) / WAIT (pullback/confirmation needed)
+        / AVOID (peak-chase or streakless pump). Sorted ENTER-first.
     """
     results = scan_market(
         min_volume=min_volume,
@@ -69,9 +72,10 @@ def scan_extensive_movements(
         "pairs_matched": len(results),
         "top_coins": results,
         "summary": {
+            "enter_now": [c["symbol"] for c in results if c["entry"] == "ENTER"],
+            "wait": [c["symbol"] for c in results if c["entry"] == "WAIT"],
+            "avoid": [c["symbol"] for c in results if c["entry"] == "AVOID"],
             "top_pick": results[0] if results else None,
-            "safest_high_streak": next((c for c in results if c["verdict"] == "OK" and c["positive_streak_days"] >= 3), None),
-            "flagged": [c["symbol"] for c in results if c["verdict"] != "OK"]
         }
     }
 
@@ -93,6 +97,7 @@ def get_coin_analysis(symbol: str) -> dict:
     ticker = get_ticker_detail(symbol)
     klines_raw = get_klines_detailed(symbol, "1d", 14)
     klines_data = [[0, k["open"], k["high"], k["low"], k["close"]] for k in klines_raw]
+    intraday = get_intraday_momentum(symbol)
 
     atr_info = calc_atr(klines_data, period=14)
     daily_changes = [k["change_pct"] for k in klines_raw[-8:]]
@@ -118,7 +123,17 @@ def get_coin_analysis(symbol: str) -> dict:
             "avg_daily_change": streak_info["avg_daily_change"],
             "avg_positive_gain": streak_info["avg_positive_gain"]
         },
-        "intraday_now": get_intraday_momentum(symbol),
+        "intraday_now": intraday,
+        "entry_signal": entry_decision(
+            streak_info["positive_streak"],
+            streak_info["net_change_pct"],
+            float(ticker["priceChangePercent"]),
+            (intraday or {}).get("dist_from_4h_high_pct", 99.0),
+            safety_verdict(
+                float(ticker["priceChangePercent"]),
+                (intraday or {}).get("dist_from_4h_high_pct", 99.0)
+            )["verdict"]
+        ) if intraday else {"entry": "WAIT", "size": "0% - esperar", "reason": "sin datos intradía"},
         "recent_daily_candles": klines_raw[-7:]
     }
 
