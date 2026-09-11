@@ -29,6 +29,7 @@ def scan_extensive_movements(
     min_vol_spike: float = 1.0,
     min_24h_pct: float = 0.0,
     only_positive: bool = True,
+    include_watchlist: bool = True,
 ) -> dict:
     """
     TODO-EN-UNO scan of Binance USDT pairs. Each coin in top_coins carries:
@@ -48,6 +49,8 @@ def scan_extensive_movements(
         min_vol_spike: Minimum volume acceleration vs average (default: 1.0)
         min_24h_pct: Minimum 24h change % (default: 0.0)
         only_positive: If True, only rising coins (default: True)
+        include_watchlist: If True, append WATCH tier (right direction, not all
+            gates passed: 1h>=0.8%, 4h>=0.5%, spike>=0.7x) for a longer list (default: True)
 
     Returns:
         Dictionary with hybrid-ranked movers. Every coin carries an automatic
@@ -62,6 +65,7 @@ def scan_extensive_movements(
         min_vol_spike=min_vol_spike,
         min_24h_pct=min_24h_pct,
         only_positive=only_positive,
+        include_watchlist=include_watchlist,
     )
 
     return {
@@ -77,6 +81,7 @@ def scan_extensive_movements(
             "min_4h_pct": min_4h_pct,
             "min_vol_spike": min_vol_spike,
             "min_24h_pct": min_24h_pct,
+            "include_watchlist": include_watchlist,
         },
         "pairs_matched": len(results),
         "top_coins": results,

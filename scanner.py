@@ -434,8 +434,9 @@ def scan_market(
     min_vol_spike: float = 1.0,
     min_24h_pct: float = 0.0,
     only_positive: bool = True,
+    include_watchlist: bool = True,
 ) -> list:
-    """HIBRIDO en 2 etapas:
+    """HIBRIDO en 2 etapas + nivel WATCH para lista extensa:
     1. PUERTA intradía (1 request 15m x17 por moneda): solo lo que se mueve AHORA.
     2. RANKING por racha diaria (1 request 1d x8 solo para las que pasan):
        consistencia primero, velocidad después. Neto 7d negativo hunde rebotes
@@ -455,21 +456,36 @@ def scan_market(
         if intra is None:
             continue
 
+        passes = True
         if only_positive:
             if intra["chg_1h"] < min_1h_pct:
-                continue
+                passes = False
             if intra["chg_4h"] < min_4h_pct:
-                continue
+                passes = False
         if intra["vol_spike"] < min_vol_spike:
+            passes = False
+
+        tier = "PASS" if passes else None
+        if tier is None and include_watchlist:
+            # WATCH: dirección correcta pero sin pasar todo (para lista extensa)
+            if (intra["chg_1h"] >= 0.8 and intra["chg_4h"] >= 0.5
+                    and intra["vol_spike"] >= 0.7):
+                tier = "WATCH"
+        if tier is None:
             continue
 
-        gated.append((sym, pct_24h, vol, intra))
+        gated.append((sym, pct_24h, vol, intra, tier))
 
         if (i + 1) % 50 == 0:
             time.sleep(0.5)
 
+    # Capar WATCH para no disparar requests: los de mejor 1h primero
+    gated.sort(key=lambda g: (0 if g[4] == "PASS" else 1, -g[3]["chg_1h"]))
+    gated = [g for g in gated if g[4] == "PASS"] + \
+            [g for g in gated if g[4] == "WATCH"][:max(top_n, 10)]
+
     results = []
-    for sym, pct_24h, vol, intra in gated:
+    for sym, pct_24h, vol, intra, tier in gated:
         try:
             ks = get_klines(sym, "1d", 8)
             if len(ks) < 8:
@@ -481,6 +497,7 @@ def scan_market(
                                    pct_24h, intra, safety["verdict"])
             results.append({
                 "symbol": sym,
+                "tier": tier,
                 "price": intra["price"],
                 "chg_1h": intra["chg_1h"],
                 "chg_4h": intra["chg_4h"],
@@ -503,10 +520,12 @@ def scan_market(
             continue
         time.sleep(0.03)
 
-    # Orden: señal de entrada primero (ENTER > WAIT > AVOID), luego híbrido clásico
+    # Orden: tier PASS primero, luego señal de entrada, luego híbrido clásico
     rank = {"ENTER": 2, "WAIT": 1, "AVOID": 0}
+    tier_rank = {"PASS": 1, "WATCH": 0}
     results.sort(
-        key=lambda x: (rank.get(x["entry"], 0), x["positive_streak_days"],
+        key=lambda x: (tier_rank.get(x["tier"], 0), rank.get(x["entry"], 0),
+                       x["positive_streak_days"],
                        x["chg_1h"], x["net_7d_pct"], x["vol_spike"]),
         reverse=True
     )
