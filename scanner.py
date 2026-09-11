@@ -32,6 +32,30 @@ def calc_daily_changes(klines: list) -> list:
         changes.append(round(pct, 2))
     return changes
 
+def get_intraday_momentum(symbol: str) -> dict | None:
+    """Momentum intradía real: cambio 1h y 4h + spike de volumen (velas 15m).
+    Filtro principal: detecta lo que se mueve AHORA, no ayer."""
+    try:
+        ks = get_klines(symbol, "15m", 17)
+    except Exception:
+        return None
+    if len(ks) < 17:
+        return None
+    closes = [float(k[4]) for k in ks]
+    quote_vols = [float(k[5]) * float(k[4]) for k in ks]
+    chg_1h = (closes[-1] / closes[-5] - 1) * 100 if closes[-5] > 0 else 0
+    chg_4h = (closes[-1] / closes[0] - 1) * 100 if closes[0] > 0 else 0
+    base_vol = sum(quote_vols[:-4]) / 13
+    spike = (sum(quote_vols[-4:]) / 4) / base_vol if base_vol > 0 else 0
+    green_1h = sum(1 for i in range(-4, 0) if closes[i] > closes[i - 1])
+    return {
+        "chg_1h": round(chg_1h, 2),
+        "chg_4h": round(chg_4h, 2),
+        "vol_spike": round(spike, 1),
+        "green_candles_1h": f"{green_1h}/4",
+        "price": closes[-1],
+    }
+
 def calc_atr(klines: list, period: int = 14) -> dict:
     if len(klines) < 2:
         return {"atr": 0, "atr_pct": 0, "tr_values": []}
@@ -105,13 +129,15 @@ def analyze_bullish_streak(daily_changes: list, klines: list) -> dict:
 def scan_market(
     min_volume: float = 5_000_000,
     top_n: int = 20,
-    min_atr_pct: float = 2.0,
-    only_positive: bool = True,
-    min_positive_days: int = 4,
+    min_1h_pct: float = 1.5,
+    min_4h_pct: float = 2.0,
+    min_vol_spike: float = 1.0,
     min_24h_pct: float = 0.0,
-    min_net_7d_pct: float = 0.0,
-    interval: str = "1d"
+    only_positive: bool = True,
 ) -> list:
+    """Filtro INTRADIA (reemplaza al ATR diario): solo monedas moviéndose AHORA.
+    1 request (15m x17) por moneda. El ATR diario quedó como dato informativo
+    en get_coin_analysis, ya no filtra."""
     tickers = get_all_usdt_tickers(min_volume)
     results = []
 
@@ -119,76 +145,38 @@ def scan_market(
         sym = t["symbol"]
         pct_24h = float(t["priceChangePercent"])
         vol = float(t["quoteVolume"])
-        high_24h = float(t["highPrice"])
-        low_24h = float(t["lowPrice"])
-        price = float(t["lastPrice"])
 
-        # Early filter: if user wants positive coins only, 24h must be >= threshold
         if only_positive and pct_24h < min_24h_pct:
             continue
 
-        try:
-            klines = get_klines(sym, interval, 14)
-            if len(klines) < 8:
-                continue
-
-            # Analyze last 7 days + today for streak & net change
-            recent_klines = klines[-8:]
-            daily = calc_daily_changes(recent_klines)
-            streak_info = analyze_bullish_streak(daily, recent_klines)
-            atr_data = calc_atr(klines, period=14)
-
-            range_24h = ((high_24h - low_24h) / low_24h) * 100 if low_24h > 0 else 0
-
-            # Filter out flat / low-volatility coins
-            if atr_data["atr_pct"] < min_atr_pct:
-                continue
-
-            # Bullish / Positive consistency filters
-            if only_positive:
-                if streak_info["net_change_pct"] < min_net_7d_pct:
-                    continue
-                if streak_info["positive_days"] < min_positive_days:
-                    continue
-
-            results.append({
-                "symbol": sym,
-                "price": price,
-                "pct_24h": round(pct_24h, 2),
-                "range_24h": round(range_24h, 2),
-                "volume_24h": round(vol, 0),
-                "atr": atr_data["atr"],
-                "atr_pct": atr_data["atr_pct"],
-                "positive_streak": streak_info["positive_streak"],
-                "positive_days": f"{streak_info['positive_days']}/{len(daily)}",
-                "net_7d_pct": streak_info["net_change_pct"],
-                "avg_daily_change": streak_info["avg_daily_change"],
-                "avg_positive_gain": streak_info["avg_positive_gain"],
-                "daily_changes": daily[-7:]
-            })
-        except Exception:
+        intra = get_intraday_momentum(sym)
+        if intra is None:
             continue
+
+        if only_positive:
+            if intra["chg_1h"] < min_1h_pct:
+                continue
+            if intra["chg_4h"] < min_4h_pct:
+                continue
+        if intra["vol_spike"] < min_vol_spike:
+            continue
+
+        results.append({
+            "symbol": sym,
+            "price": intra["price"],
+            "chg_1h": intra["chg_1h"],
+            "chg_4h": intra["chg_4h"],
+            "vol_spike": intra["vol_spike"],
+            "green_candles_1h": intra["green_candles_1h"],
+            "pct_24h": round(pct_24h, 2),
+            "volume_24h": round(vol, 0),
+        })
 
         if (i + 1) % 50 == 0:
             time.sleep(0.5)
 
-    # Sort primarily by:
-    # 1. positive streak (consecutive green days)
-    # 2. total positive days count
-    # 3. net 7-day performance
-    # 4. ATR volatility percentage
-    if only_positive:
-        results.sort(
-            key=lambda x: (
-                x["positive_streak"],
-                int(x["positive_days"].split("/")[0]),
-                x["net_7d_pct"],
-                x["atr_pct"]
-            ),
-            reverse=True
-        )
-    else:
-        results.sort(key=lambda x: (x["atr_pct"], x["pct_24h"]), reverse=True)
+    # Orden: 1h, spike de volumen, 4h
+    results.sort(key=lambda x: (x["chg_1h"], x["vol_spike"], x["chg_4h"]), reverse=True)
 
     return results[:top_n]
 

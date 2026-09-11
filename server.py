@@ -4,6 +4,7 @@ from scanner import (
     get_ticker_detail,
     get_klines_detailed,
     get_all_usdt_tickers,
+    get_intraday_momentum,
     calc_atr,
     calc_daily_changes,
     analyze_bullish_streak
@@ -12,65 +13,63 @@ from datetime import datetime
 
 mcp = FastMCP(
     "binance-trend-finder",
-    description="Binance market scanner - detects coins with sustained positive upward momentum and high ATR"
+    description="Binance market scanner - detects coins moving RIGHT NOW (intraday 1h/4h/volume-spike filter)"
 )
 
 @mcp.tool()
 def scan_extensive_movements(
     min_volume: float = 5_000_000,
     top_n: int = 20,
-    min_atr_pct: float = 2.0,
-    only_positive: bool = True,
-    min_positive_days: int = 4,
+    min_1h_pct: float = 1.5,
+    min_4h_pct: float = 2.0,
+    min_vol_spike: float = 1.0,
     min_24h_pct: float = 0.0,
-    min_net_7d_pct: float = 0.0,
-    interval: str = "1d"
+    only_positive: bool = True,
 ) -> dict:
     """
-    Scan Binance USDT pairs and find coins with sustained extensive movements.
-    Filters for consistent positive/bullish momentum (avoids falling/bleeding coins).
-    
+    Scan Binance USDT pairs for coins moving RIGHT NOW (intraday filter).
+    Replaces the old daily-ATR filter: uses 1h change + 4h change + volume spike
+    on 15m candles, so dead-today coins never reach the top.
+
     Args:
         min_volume: Minimum 24h quote volume in USDT (default: 5M)
         top_n: Number of top results to return (default: 20)
-        min_atr_pct: Minimum ATR percentage to filter out flat/low-volatility coins (default: 2.0)
-        only_positive: If True, only returns coins in a sustained uptrend (green days, net positive 7d) (default: True)
-        min_positive_days: Minimum positive/green days in the last 8 days (default: 4)
-        min_24h_pct: Minimum 24h price change percentage (default: 0.0)
-        min_net_7d_pct: Minimum net 7-day price gain percentage (default: 0.0)
-        interval: Kline interval (default: '1d')
-    
+        min_1h_pct: Minimum last-hour gain % (default: 1.5)
+        min_4h_pct: Minimum last-4h gain % (default: 2.0, kills dead-cat bounces)
+        min_vol_spike: Minimum volume acceleration vs average (default: 1.0)
+        min_24h_pct: Minimum 24h change % (default: 0.0)
+        only_positive: If True, only rising coins (default: True)
+
     Returns:
-        Dictionary with top bullish coins ranked by positive streak, net 7d gain, and ATR
+        Dictionary with live movers ranked by 1h gain, volume spike, 4h gain
     """
     results = scan_market(
         min_volume=min_volume,
         top_n=top_n,
-        min_atr_pct=min_atr_pct,
-        only_positive=only_positive,
-        min_positive_days=min_positive_days,
+        min_1h_pct=min_1h_pct,
+        min_4h_pct=min_4h_pct,
+        min_vol_spike=min_vol_spike,
         min_24h_pct=min_24h_pct,
-        min_net_7d_pct=min_net_7d_pct,
-        interval=interval
+        only_positive=only_positive,
     )
 
     return {
-        "scan_time": datetime.utcnow().isoformat(),
+        "scan_time": datetime.utcnow().isoformat() + "Z",
+        "filter": "INTRADAY (1h/4h/spike) - daily ATR no longer filters",
         "filters_applied": {
             "only_positive": only_positive,
             "min_volume": min_volume,
-            "min_atr_pct": min_atr_pct,
-            "min_positive_days": min_positive_days,
+            "min_1h_pct": min_1h_pct,
+            "min_4h_pct": min_4h_pct,
+            "min_vol_spike": min_vol_spike,
             "min_24h_pct": min_24h_pct,
-            "min_net_7d_pct": min_net_7d_pct,
-            "interval": interval
         },
         "pairs_matched": len(results),
         "top_coins": results,
         "summary": {
-            "top_momentum_coin": results[0] if results else None,
-            "highest_7d_gain": max(results, key=lambda x: x["net_7d_pct"]) if results else None,
-            "highest_atr": max(results, key=lambda x: x["atr_pct"]) if results else None
+            "hottest_now": results[0] if results else None,
+            "highest_4h": max(results, key=lambda x: x["chg_4h"]) if results else None,
+            "highest_spike": max(results, key=lambda x: x["vol_spike"]) if results else None
         }
     }
 
@@ -117,6 +116,7 @@ def get_coin_analysis(symbol: str) -> dict:
             "avg_daily_change": streak_info["avg_daily_change"],
             "avg_positive_gain": streak_info["avg_positive_gain"]
         },
+        "intraday_now": get_intraday_momentum(symbol),
         "recent_daily_candles": klines_raw[-7:]
     }
 
