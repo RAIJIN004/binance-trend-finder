@@ -472,8 +472,10 @@ def confluence_decision(symbol: str, square_bias: str = "neutral",
                  "cierran SHORTS → LONG, solo con giro confirmado. Sin extremo + divergencia + giro "
                  "NO hay trade: WAIT/AVOID. No existe 'alineación parcial'.",
         "disclaimer": "NO ES ASESORÍA FINANCIERA NI ANÁLISIS FINANCIERO. DYOR: opera SOLO extremo + "
-                      "divergencia + giro. Square gritando el lado viejo en el pico es liquidez "
-                      "de salida para cazar, jamás señal a favor.",
+                      "divergencia + giro. MÁXIMA PROBABILIDAD: orderbook + Square alineados con la "
+                      "tendencia sobre-extendida + precio divergente en contra = reversión a la tendencia; "
+                      "la multitud alineada es tu LIQUIDEZ. Square gritando el lado viejo en el pico es "
+                      "liquidez de salida para cazar, jamás señal a favor.",
     }
 
 def calc_daily_changes(klines: list) -> list:

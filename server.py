@@ -86,8 +86,11 @@ def scan_extensive_movements(
                  "que empiezan a cerrar: cierran LONGS → SHORT; cierran SHORTS → LONG.",
         "disclaimer": "ESTO NO ES ASESORÍA FINANCIERA NI ANÁLISIS FINANCIERO. DYOR. "
                       "Solo existe trade con EXTREMO + DIVERGENCIA + giro confirmado; "
-                      "todo lo demás es esperar. La multitud de Square en el pico es "
-                      "liquidez de salida, no confirmación.",
+                      "todo lo demás es esperar. ENTRADA DE MÁXIMA PROBABILIDAD: orderbook + "
+                      "Square ALINEADOS en dirección de la tendencia sobre-extendida + PRECIO "
+                      "DIVERGENTE en contra (pullback) = reversión a la tendencia. La multitud "
+                      "alineada se convierte en LIQUIDEZ (sus stops pagan tu entrada con límite). "
+                      "Entrar con la multitud en el extremo = regalarles tu liquidez.",
         "filters_applied": {
             "only_positive": only_positive,
             "min_volume": min_volume,
