@@ -1,4 +1,4 @@
-# Binance Trend Finder (MCP Server)
+# Trend Finder Shorts (MCP Server) — SHORT side + contrarian
 
 MCP server for scanning Binance markets to detect coins **moving RIGHT NOW with consistency**: hybrid filter (intraday gate + daily-streak ranking + safety verdict).
 

@@ -18,7 +18,7 @@ from scanner import (
 from datetime import datetime
 
 mcp = FastMCP(
-    "binance-trend-finder",
+    "trend-finder-shorts",
     description="Binance market scanner - detects coins moving RIGHT NOW (intraday 1h/4h/volume-spike filter)"
 )
 
