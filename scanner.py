@@ -306,9 +306,12 @@ def approve_trade(symbol: str, side: str, entry_price: float, leverage: float,
         "confluence": {"final": conf["final"], "score": conf["confluence_score"],
                        "pullback_plan": conf.get("pullback_plan")},
         "scope": "APPROVED = luz verde matemática, NO garantía de ganancia. "
-                 "REJECTED = no abrir bajo ningún relato ('alineación parcial' incluida).",
-        "disclaimer": "NO ES ASESORÍA FINANCIERA. Revisa el trade por tu cuenta (DYOR) "
-                      "aunque salga APPROVED: el mercado siempre puede invalidarlo.",
+                 "REJECTED = no abrir bajo ningún relato ('alineación parcial' incluida). "
+                 "APPROVED solo vale dentro del SETUP EXTREMO: extremo + divergencia + giro; "
+                 "fuera de eso, APPROVED es papel mojado.",
+        "disclaimer": "NO ES ASESORÍA FINANCIERA NI ANÁLISIS FINANCIERO. DYOR aunque salga "
+                      "APPROVED: verifica extremo (días + spike + alineación), divergencia "
+                      "(precio en contra) y giro confirmado antes de arriesgar.",
     }
 
 def confluence_decision(symbol: str, square_bias: str = "neutral",
@@ -461,13 +464,16 @@ def confluence_decision(symbol: str, square_bias: str = "neutral",
         },
         "vetoes": long_vetoes,
         "symbol_warnings": problems,
-        "scope": "Esta tool es la ÚNICA que autoriza entradas. El scanner solo filtra momentum; "
-                 "el orderbook mide liquidez y Square confirma intención. Para LONG, ambos deben "
-                 "alinearse; precio en caída con intención/book LONG es divergencia de toma de "
-                 "ganancias y bloquea LONG. Para SHORT, el rechazo debe estar confirmado; no hay "
-                 "'alineación parcial'.",
-        "disclaimer": "NO ES ASESORÍA FINANCIERA. Verifica por tu cuenta (DYOR): Square y "
-                      "orderbook alineados al mismo lado, o una divergencia clara de toma de ganancias.",
+        "scope": "Esta tool es la ÚNICA que autoriza entradas. SETUP EXTREMO (único operable): "
+                 "(1) EXTREMO = racha de varios días + spike repentino + Square y orderbook "
+                 "alineados al MISMO lado; (2) DIVERGENCIA = el precio se da la vuelta EN CONTRA "
+                 "(toma de ganancias) mientras Square sigue del lado viejo: esa multitud es la "
+                 "LIQUIDEZ, no confirmación; (3) ENTRADA = cazar los cierres: cierran LONGS → SHORT, "
+                 "cierran SHORTS → LONG, solo con giro confirmado. Sin extremo + divergencia + giro "
+                 "NO hay trade: WAIT/AVOID. No existe 'alineación parcial'.",
+        "disclaimer": "NO ES ASESORÍA FINANCIERA NI ANÁLISIS FINANCIERO. DYOR: opera SOLO extremo + "
+                      "divergencia + giro. Square gritando el lado viejo en el pico es liquidez "
+                      "de salida para cazar, jamás señal a favor.",
     }
 
 def calc_daily_changes(klines: list) -> list:

@@ -77,14 +77,17 @@ def scan_extensive_movements(
         "filter": "HYBRID: intraday gate (1h/4h/spike) + daily-streak ranking + safety verdict",
         "scope": "SCREENER ONLY - momentum pre-filter, NOT a trade signal. "
                  "Use confluence_check(symbol, square_bias) before risking capital. "
-                 "NEVER open on scanner verdict alone. LÓGICA CONTRARIAN: Square + orderbook "
-                 "mismo lado = DIVERGENCIA (agotamiento). Square bullish + orderbook bullish "
-                 "+ precio subiendo = SHORT. Square bearish + orderbook bearish + precio "
-                 "cayendo = LONG.",
-        "disclaimer": "ESTO NO ES ASESORÍA FINANCIERA. Haz tu propio análisis (DYOR): "
-                      "Square + orderbook mismo lado + precio moviéndose = DIVERGENCIA "
-                      "(entrada contrarian). Si todos gritan LONG y el precio cae, es "
-                      "distribución (ballenas vendiendo al retail), no señal de compra.",
+                 "NEVER open on scanner verdict alone. SETUP EXTREMO (único operable): "
+                 "(1) EXTREMO = racha de varios días + subida repentina reciente + Square "
+                 "y orderbook alineados al MISMO lado; ir A FAVOR solo es válido en ese "
+                 "extremo, nunca en tibios. (2) DIVERGENCIA = el precio se da la vuelta "
+                 "EN CONTRA del setup (toma de ganancias) mientras Square sigue gritando "
+                 "el lado viejo: esa multitud es la LIQUIDEZ. (3) ENTRADA = cazar a los "
+                 "que empiezan a cerrar: cierran LONGS → SHORT; cierran SHORTS → LONG.",
+        "disclaimer": "ESTO NO ES ASESORÍA FINANCIERA NI ANÁLISIS FINANCIERO. DYOR. "
+                      "Solo existe trade con EXTREMO + DIVERGENCIA + giro confirmado; "
+                      "todo lo demás es esperar. La multitud de Square en el pico es "
+                      "liquidez de salida, no confirmación.",
         "filters_applied": {
             "only_positive": only_positive,
             "min_volume": min_volume,
