@@ -71,12 +71,16 @@ def get_open_positions() -> dict:
         "note": "Sin posiciones abiertas." if not rows else f"{len(rows)} posición(es) abierta(s).",
     }
 
-def get_open_orders() -> dict:
-    """Todas las órdenes vivas: regulares + algo (TP/SL/trailing).
-    Marca HUÉRFANAS las de símbolos SIN posición abierta (candidatas a limpieza,
-    la IA a veces no las cancela). Solo lectura."""
-    orders = _signed_futures("GET", "/fapi/v1/openOrders") or []
-    algos_raw = _signed_futures("GET", "/fapi/v1/openAlgoOrders")
+def get_open_orders(symbol: str | None = None) -> dict:
+    """Return open ordinary and conditional orders for one futures symbol.
+
+    This is read-only. It intentionally excludes closed/filled orders.
+    """
+    if symbol:
+        symbol = symbol.upper()
+
+    orders = _signed_futures("GET", "/fapi/v1/openOrders", {"symbol": symbol} if symbol else None) or []
+    algos_raw = _signed_futures("GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol} if symbol else None)
     algos = algos_raw if isinstance(algos_raw, list) else (algos_raw or {}).get("orders", [])
     pos = _signed_futures("GET", "/fapi/v3/positionRisk") or []
     pos_syms = {p.get("symbol") for p in pos if float(p.get("positionAmt", 0) or 0) != 0}
@@ -91,26 +95,45 @@ def get_open_orders() -> dict:
         b = bucket(o.get("symbol"))
         b["regular"].append({
             "orderId": o.get("orderId"),
+            "clientOrderId": o.get("clientOrderId"),
+            "symbol": o.get("symbol", symbol),
             "type": o.get("type"),
             "side": o.get("side"),
-            "price": o.get("price"),
-            "stopPrice": o.get("stopPrice"),
-            "activatePrice": o.get("activatePrice"),
-            "callbackRate": o.get("callbackRate"),
-            "origQty": o.get("origQty"),
             "status": o.get("status"),
+            "timeInForce": o.get("timeInForce"),
+            "price": float(o.get("price") or 0),
+            "stopPrice": o.get("stopPrice"),
+            "workingType": o.get("workingType"),
+            "priceProtect": o.get("priceProtect"),
+            "origQty": o.get("origQty"),
+            "executedQty": o.get("executedQty"),
+            "canceledQty": o.get("canceledQty"),
+            "reduceOnly": bool(o.get("reduceOnly", False)),
+            "isWorking": o.get("isWorking"),
+            "updateTime": o.get("updateTime"),
         })
     for a in algos:
         b = bucket(a.get("symbol"))
         b["algos"].append({
             "algoId": a.get("algoId"),
+            "clientAlgoOrderId": a.get("clientAlgoOrderId"),
+            "symbol": a.get("symbol"),
             "orderType": a.get("orderType") or a.get("type"),
             "side": a.get("side"),
+            "positionSide": a.get("positionSide"),
+            "status": a.get("algoStatus") or a.get("status"),
+            "triggerType": a.get("triggerType"),
             "triggerPrice": a.get("triggerPrice"),
             "activatePrice": a.get("activatePrice"),
             "callbackRate": a.get("callbackRate"),
+            "powerPrice": a.get("powerPrice"),
             "quantity": a.get("quantity"),
-            "status": a.get("algoStatus") or a.get("status"),
+            "workingType": a.get("workingType"),
+            "priceProtect": a.get("priceProtect"),
+            "isAutoDelete": a.get("isAutoDelete"),
+            "reduceOnly": a.get("reduceOnly"),
+            "closePosition": a.get("closePosition"),
+            "updateTime": a.get("updateTime"),
         })
 
     symbols = []
@@ -124,6 +147,7 @@ def get_open_orders() -> dict:
         symbols.append(b)
 
     return {
+        "symbol": symbol,
         "symbols_with_orders": len(symbols),
         "total_regular": sum(len(b["regular"]) for b in symbols),
         "total_algos": sum(len(b["algos"]) for b in symbols),
@@ -209,11 +233,12 @@ def approve_trade(symbol: str, side: str, entry_price: float, leverage: float,
         if not ok:
             fails.append(name)
 
-    # 1) Confluencia (momentum + orderbook + square)
-    conf = confluence_decision(sym, square_bias, square_note)
-    check("confluence_ENTER",
-          conf["final"] == "ENTER",
-          f"confluence={conf['final']} {conf['confluence_score']} vetoes={conf['vetoes'] or 'ninguno'}")
+    # 1) Confluencia (momentum + orderbook + square + lado solicitado)
+    conf = confluence_decision(sym, square_bias, square_note, side)
+    side_decision = conf["side_decision"].get(side, {})
+    check("confluence_enter",
+          side_decision.get("final") == "ENTER",
+          f"confluence={conf['final']} side={side} side_decision={side_decision.get('final')} vetoes={side_decision.get('vetoes') or 'ninguno'}")
 
     # 2) Lado válido
     check("side_valido", side in ("LONG", "SHORT"), f"side={side}")
@@ -287,14 +312,23 @@ def approve_trade(symbol: str, side: str, entry_price: float, leverage: float,
     }
 
 def confluence_decision(symbol: str, square_bias: str = "neutral",
-                        square_note: str = "") -> dict:
+                        square_note: str = "", side: str = "LONG") -> dict:
     """Combina 3 fuentes con reglas FIJAS y vetos. Ninguna fuente decide sola:
     - Momentum (scanner propio): 40 pts
     - Orderbook (medido aquí, no interpretado): 35 pts
     - Square/sentiment (lo aporta la IA, única entrada externa): 25 pts
-    Regla anti-narrativa: CUALQUIER contradicción fuerte = WAIT o AVOID.
+
+    La "alineación" Square+Orderbook+Mismo lado es señal de AGOTAMIENTO, no de entrada.
+    Square bullish + orderbook bullish + precio subiendo = DIVERGENCIA = SHORT.
+    Square bearish + orderbook bearish + precio cayendo = DIVERGENCIA = LONG.
+    El rechazo ya está confirmado por la divergencia misma; no se espera confirmación adicional.
+
+    Regla anti-narrativa: CUALQUIER contradicción entre fuentes = WAIT o AVOID.
     No existen 'entradas por alineación parcial'."""
     sym = symbol.upper()
+    side = (side or "LONG").upper()
+    if side not in ("LONG", "SHORT"):
+        side = "LONG"
     problems = []
     if not sym.replace("USDT", "").isalnum() or not sym.isascii():
         problems.append("SÍMBOLO NO ESTÁNDAR: verifícalo en el exchange antes de operar")
@@ -328,42 +362,74 @@ def confluence_decision(symbol: str, square_bias: str = "neutral",
 
     # 2) Orderbook (medido aquí)
     ob = get_orderbook_bias(sym)
-    ob_score = 0
+    ob_score_long = 0
+    ob_score_short = 0
     if ob is None:
         ob_detail = "orderbook no disponible"
     else:
         imb = ob["imbalance"]
-        ob_score = 35 if imb >= 0.15 else (25 if imb >= 0.05 else (12 if imb > -0.05 else (5 if imb > -0.15 else 0)))
+        ob_score_long = 35 if imb >= 0.15 else (25 if imb >= 0.05 else (12 if imb > -0.05 else (5 if imb > -0.15 else 0)))
+        ob_score_short = 35 if imb <= -0.15 else (25 if imb <= -0.05 else (12 if imb > -0.05 else (5 if imb < 0.15 else 0)))
         ob_detail = ob
 
     # 3) Square (externo, lo trae la IA)
     sq = (square_bias or "neutral").lower()
     if sq not in ("bullish", "bearish", "neutral"):
         sq = "neutral"
-    sq_score = {"bullish": 25, "neutral": 12, "bearish": 0}[sq]
+    sq_score_long = {"bullish": 25, "neutral": 12, "bearish": 0}[sq]
+    sq_score_short = {"bearish": 25, "neutral": 12, "bullish": 0}[sq]
 
-    score = mom_score + ob_score + sq_score
+    # 4) Rechazo de LONG antes de calcular el veredicto direccional.
+    long_rejection = detect_rejection(intra, ob_detail if isinstance(ob_detail, dict) else None, sq, mom_entry)
+    mom_score_short = 40 if long_rejection["detected"] else (20 if mom_entry == "AVOID" else (20 if mom_entry == "WAIT" else 0))
+    score_long = mom_score + ob_score_long + sq_score_long
+    score_short = mom_score_short + ob_score_short + sq_score_short
 
-    # VETOS (pisan el puntaje, sin excepción)
-    vetoes = []
+    # VETOS para LONG (pisan el puntaje, sin excepción)
+    long_vetoes = []
     if mom_entry == "AVOID":
-        vetoes.append("momentum AVOID: el scanner descarta la moneda")
+        long_vetoes.append("momentum AVOID: el scanner descarta la moneda")
     if sq == "bearish":
-        vetoes.append("Square bearish: sentimiento en contra, máximo WAIT")
+        long_vetoes.append("Square bearish: sentimiento en contra, máximo WAIT")
     if isinstance(ob_detail, dict) and ob_detail["bias"] == "bearish" and mom_entry == "ENTER":
-        vetoes.append(f"orderbook en contra (imb={ob_detail['imbalance']}): momentum dice ENTER pero no hay bids que lo sostengan")
+        long_vetoes.append(f"orderbook en contra (imb={ob_detail['imbalance']}): momentum dice ENTER pero no hay bids que lo sostengan")
     if isinstance(ob_detail, dict) and ob_detail["spread_pct"] > 0.30:
-        vetoes.append(f"spread {ob_detail['spread_pct']}%: impuesto microcap, no entrada a mercado")
-
+        long_vetoes.append(f"spread {ob_detail['spread_pct']}%: impuesto microcap, no entrada a mercado")
+    if long_rejection["detected"]:
+        long_vetoes.append(long_rejection["reason"])
     if mom_entry == "WAIT":
-        vetoes.append("momentum WAIT (sin ENTER): orderbook y Square no pueden autorizar solas")
-    if vetoes or score < 70:
-        if mom_entry == "AVOID" or (sq == "bearish" and mom_entry != "ENTER"):
-            final, size = "AVOID", "0% - descartar"
+        long_vetoes.append("momentum WAIT (sin ENTER): orderbook y Square no pueden autorizar solas")
+
+    if long_vetoes or score_long < 70:
+        if mom_entry == "AVOID" or (sq == "bearish" and mom_entry != "ENTER") or long_rejection["detected"]:
+            long_final, long_size = "AVOID", "0% - descartar"
         else:
-            final, size = "WAIT", "0% - esperar"
+            long_final, long_size = "WAIT", "0% - esperar"
     else:
-        final, size = "ENTER", "100% - operar"
+        long_final, long_size = "ENTER", "100% - operar"
+
+    # Para SHORT solo se opera cuando existe una inversión clara del LONG.
+    short_vetoes = []
+    if not long_rejection["detected"]:
+        short_vetoes.append("sin rechazo: no hay evidencia de absorción para invertir a SHORT")
+    if sq == "bullish" and not long_rejection["detected"]:
+        short_vetoes.append("Square bullish en contra de SHORT")
+    if ob is None:
+        short_vetoes.append("orderbook no disponible para confirmar SHORT")
+    elif isinstance(ob_detail, dict) and ob_detail["spread_pct"] > 0.30:
+        short_vetoes.append(f"spread {ob_detail['spread_pct']}%: impuesto microcap, no entrada a mercado")
+
+    if short_vetoes or score_short < 70:
+        short_final, short_size = "WAIT", "0% - esperar confirmación SHORT"
+    else:
+        short_final, short_size = "ENTER", "100% - operar SHORT"
+
+    if long_rejection["detected"]:
+        recommended_side = "SHORT"
+    elif long_final == "ENTER":
+        recommended_side = "LONG"
+    else:
+        recommended_side = None
 
     pullback_plan = None
     if isinstance(mom_detail, dict):
@@ -371,22 +437,37 @@ def confluence_decision(symbol: str, square_bias: str = "neutral",
 
     return {
         "symbol": sym,
-        "final": final,
-        "suggested_size": size,
-        "confluence_score": f"{score}/100 (ENTER exige >=70 SIN vetos)",
+        "requested_side": side,
+        "final": long_final,
+        "suggested_size": long_size,
+        "recommended_side": recommended_side,
+        "side_decision": {
+            "LONG": {"final": long_final, "suggested_size": long_size, "vetoes": long_vetoes},
+            "SHORT": {"final": short_final, "suggested_size": short_size, "vetoes": short_vetoes},
+        },
+        "confluence_score": f"{score_long}/100 (LONG exige >=70 SIN vetos)",
+        "short_score": f"{score_short}/100 (SHORT exige >=70 SIN vetos)",
         "pullback_plan": pullback_plan,
         "trace": {
             "momentum_40": {"score": mom_score, "detail": mom_detail},
-            "orderbook_35": {"score": ob_score, "detail": ob_detail},
-            "square_25": {"bias": sq, "score": sq_score, "note": square_note},
+            "orderbook_35": {"score": ob_score_long, "detail": ob_detail},
+            "square_25": {"bias": sq, "score": sq_score_long, "note": square_note},
+            "rejection": long_rejection,
+            "short_trace": {
+                "momentum_score": mom_score_short,
+                "orderbook_score": ob_score_short,
+                "square_score": sq_score_short,
+            },
         },
-        "vetoes": vetoes,
+        "vetoes": long_vetoes,
         "symbol_warnings": problems,
         "scope": "Esta tool es la ÚNICA que autoriza entradas. El scanner solo filtra momentum; "
-                 "el orderbook solo mide liquidez; Square solo mide sentimiento. "
-                 "PROHIBIDO abrir posición por 'alineación parcial' si aquí sale WAIT/AVOID.",
+                 "el orderbook mide liquidez y Square confirma intención. Para LONG, ambos deben "
+                 "alinearse; precio en caída con intención/book LONG es divergencia de toma de "
+                 "ganancias y bloquea LONG. Para SHORT, el rechazo debe estar confirmado; no hay "
+                 "'alineación parcial'.",
         "disclaimer": "NO ES ASESORÍA FINANCIERA. Verifica por tu cuenta (DYOR): Square y "
-                      "confluencia alineados al mismo lado o no hay trade.",
+                      "orderbook alineados al mismo lado, o una divergencia clara de toma de ganancias.",
     }
 
 def calc_daily_changes(klines: list) -> list:
@@ -489,6 +570,76 @@ def entry_decision(streak_days: int, net_7d: float, chg_24h: float,
             "reason": f"racha {streak_days}d + moviéndose ahora + fuera del pico",
             "wait_for_pullback": None}
 
+def detect_rejection(
+    intra: dict | None,
+    ob: dict | None,
+    square_bias: str = "neutral",
+    mom_entry: str | None = None,
+) -> dict:
+    """Detecta rechazo de LONG: intención alcista contra ejecución bajista.
+
+    Una señal puede parecer LONG por momentum/Square/orderbook, pero si el precio
+    cae mientras esa intención sigue comprando, o si el book se vuelve vendedora,
+    la liquidez está absorbiendo compradores. En ese caso no se autoriza LONG:
+    se marca SHORT como candidato y se exige confirmación antes de operar.
+    """
+    sq = (square_bias or "neutral").lower()
+    if sq not in ("bullish", "bearish", "neutral"):
+        sq = "neutral"
+    chg_1h = float((intra or {}).get("chg_1h", 0) or 0)
+    chg_4h = float((intra or {}).get("chg_4h", 0) or 0)
+    price_falling = chg_1h < 0 or chg_4h < 0
+    imbalance = float((ob or {}).get("imbalance", 0) or 0)
+    ob_bearish = imbalance <= -0.05
+    ob_bullish = imbalance >= 0.05
+    momentum_bullish = (mom_entry or "").upper() == "ENTER" or chg_1h > 0 or chg_4h > 0
+    bullish_intent = sq == "bullish" or momentum_bullish
+
+    detected = False
+    reason = ""
+    if mom_entry == "ENTER" and ob_bearish:
+        detected = True
+        reason = ("rechazo de LONG: momentum pide entrada, pero el book tiene "
+                  f"desbalance vendedor (imb={imbalance:.3f})")
+    elif bullish_intent and price_falling and (ob_bearish or not ob_bullish):
+        detected = True
+        reason = ("divergencia de toma de ganancias: intención LONG pero precio "
+                  f"cae (1h={chg_1h:+.2f}%, 4h={chg_4h:+.2f}%) y el book no confirma")
+    elif sq == "bearish" and mom_entry in ("ENTER", "WAIT"):
+        detected = True
+        reason = "rechazo de LONG: Square está bearish contra la señal de momentum"
+
+    if detected:
+        return {
+            "detected": True,
+            "side": "SHORT",
+            "reason": reason,
+            "evidence": {
+                "price_falling": price_falling,
+                "chg_1h_pct": round(chg_1h, 2),
+                "chg_4h_pct": round(chg_4h, 2),
+                "orderbook_imbalance": round(imbalance, 3),
+                "orderbook_bias": (ob or {}).get("bias", "unknown"),
+                "square_bias": sq,
+                "momentum_entry": (mom_entry or "unknown").upper(),
+            },
+        }
+    return {
+        "detected": False,
+        "side": None,
+        "reason": "",
+        "evidence": {
+            "price_falling": price_falling,
+            "chg_1h_pct": round(chg_1h, 2),
+            "chg_4h_pct": round(chg_4h, 2),
+            "orderbook_imbalance": round(imbalance, 3),
+            "orderbook_bias": (ob or {}).get("bias", "unknown"),
+            "square_bias": sq,
+            "momentum_entry": (mom_entry or "unknown").upper(),
+        },
+    }
+
+
 def calc_atr(klines: list, period: int = 14) -> dict:
     if len(klines) < 2:
         return {"atr": 0, "atr_pct": 0, "tr_values": []}
@@ -573,7 +724,11 @@ def scan_market(
     1. PUERTA intradía (1 request 15m x17 por moneda): solo lo que se mueve AHORA.
     2. RANKING por racha diaria (1 request 1d x8 solo para las que pasan):
        consistencia primero, velocidad después. Neto 7d negativo hunde rebotes
-       de desplome al fondo. Incluye veredicto de seguridad por moneda."""
+       de desplome al fondo. Incluye veredicto de seguridad por moneda.
+    3. ENRIQUECIMIENTO TOP: orderbook + rechazo/toma de ganancias + Square
+       neutral por defecto. Si el precio cae con intención/book LONG o el book
+       se vuelve vendedor contra momentum ENTER, se bloquea LONG y se sugiere SHORT.
+    """
     tickers = get_all_usdt_tickers(min_volume)
     gated = []
 
@@ -664,12 +819,18 @@ def scan_market(
     )
     top = results[:top_n]
 
-    # TODO-EN-UNO: enriquecer SOLO el top con orderbook + confluencia base
-    # + MI CUENTA (posición y órdenes vivas por moneda). Square queda neutral
-    # por defecto: la IA debe verificar square_hashtag y, si es bearish,
-    # degradar (regla en scope).
+    # Enrichment top only
     for c in top:
         ob = get_orderbook_bias(c["symbol"])
+        rejection = detect_rejection(
+            {"chg_1h": c["chg_1h"], "chg_4h": c["chg_4h"], "price": c["price"]},
+            ob,
+            "neutral",
+            c["entry"],
+        )
+        c["rejection"] = rejection
+        c["recommended_side"] = "SHORT" if rejection["detected"] else None
+
         if ob is None:
             c["orderbook"] = {"bias": "unknown", "note": "orderbook no disponible"}
             c["confluence_base"] = {"final": c["entry"], "score": "n/a",
@@ -686,17 +847,20 @@ def scan_market(
             vetoes.append("momentum WAIT: falta ENTER de momentum")
         if ob["bias"] == "bearish" and c["entry"] == "ENTER":
             vetoes.append(f"orderbook en contra (imb={imb})")
+        if rejection["detected"]:
+            vetoes.append(rejection["reason"])
         if ob["spread_pct"] > 0.30:
             vetoes.append(f"spread {ob['spread_pct']}%")
         if vetoes or score < 70:
-            final = "AVOID" if c["entry"] == "AVOID" else "WAIT"
+            final = "AVOID" if (c["entry"] == "AVOID" or rejection["detected"]) else "WAIT"
         else:
             final = "ENTER"
         c["orderbook"] = ob
         c["confluence_base"] = {
             "final": final, "score": f"{score}/100",
             "vetoes": vetoes,
-            "square_assumed": "neutral (IA debe verificar square_hashtag; si bearish → WAIT/AVOID)",
+            "note": "Square neutral por defecto: verificar square_hashtag; "
+                    "precio cae con intención/book LONG = divergencia/toma de ganancias",
         }
         time.sleep(0.03)
 

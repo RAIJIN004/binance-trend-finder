@@ -36,13 +36,13 @@ def scan_extensive_movements(
     """
     TODO-EN-UNO scan of Binance USDT pairs. Each coin in top_coins carries:
     momentum (1h/4h/spike/streak/net7d) + entry signal + pullback plan +
-    orderbook bias + confluence_base (final/score/vetoes, Square assumed neutral).
-
-    Pipeline: intraday GATE → daily-streak RANKING → orderbook + confluence +
-    MY ACCOUNT (my_position/my_orders/already_involved per coin) enrichment on
-    the top only. The ONLY thing the AI must add externally is Square sentiment:
-    if square_hashtag is bearish, WAIT/AVOID overrides any confluence_base ENTER.
-    If already_involved=true, prefer managing over opening (no duplicar posición).
+    orderbook bias + confluence_base (final/score/vetoes, Square assumed neutral) +
+    rejection/toma_de_ganancias + MY ACCOUNT (my_position/my_orders/already_involved per coin).
+    Pipeline: intraday GATE → daily-streak RANKING → orderbook + rejection +
+    MY ACCOUNT enrichment on the top only. LÓGICA CONTRARIAN: Square + orderbook
+    mismo lado = DIVERGENCIA (agotamiento), no confirmación. Square bullish + orderbook
+    bullish + precio subiendo = SHORT. Square bearish + orderbook bearish + precio
+    cayendo = LONG. Si already_involved=true, manage instead of duplicating.
     For opening: approve_trade_tool has the last word.
 
     Args:
@@ -77,10 +77,14 @@ def scan_extensive_movements(
         "filter": "HYBRID: intraday gate (1h/4h/spike) + daily-streak ranking + safety verdict",
         "scope": "SCREENER ONLY - momentum pre-filter, NOT a trade signal. "
                  "Use confluence_check(symbol, square_bias) before risking capital. "
-                 "NEVER open on scanner verdict alone.",
+                 "NEVER open on scanner verdict alone. LÓGICA CONTRARIAN: Square + orderbook "
+                 "mismo lado = DIVERGENCIA (agotamiento). Square bullish + orderbook bullish "
+                 "+ precio subiendo = SHORT. Square bearish + orderbook bearish + precio "
+                 "cayendo = LONG.",
         "disclaimer": "ESTO NO ES ASESORÍA FINANCIERA. Haz tu propio análisis (DYOR): "
-                      "antes de operar alinea Square (square_hashtag) con la confluencia "
-                      "del MCP — los 2 deben apuntar al mismo lado; si discrepan, no operes.",
+                      "Square + orderbook mismo lado + precio moviéndose = DIVERGENCIA "
+                      "(entrada contrarian). Si todos gritan LONG y el precio cae, es "
+                      "distribución (ballenas vendiendo al retail), no señal de compra.",
         "filters_applied": {
             "only_positive": only_positive,
             "min_volume": min_volume,
@@ -195,7 +199,8 @@ def list_active_pairs(min_volume: float = 10_000_000) -> dict:
 def confluence_check(
     symbol: str,
     square_bias: str = "neutral",
-    square_note: str = ""
+    square_note: str = "",
+    side: str = "LONG",
 ) -> dict:
     """
     DECISIÓN FINAL antes de operar: combina momentum + orderbook + Square con
@@ -206,20 +211,25 @@ def confluence_check(
     2. Orderbook lo mide ESTA tool sola (imbalance cuantificado, sin narrativa).
     3. Square/sentiment lo trae la IA con binance-square (square_hashtag) y lo
        pasa como square_bias + square_note. Si no hay datos de Square, dejar neutral.
+    4. La "alineación" Square+Orderbook mismo lado + precio moviéndose = DIVERGENCIA
+       (señal de agotamiento). Square bullish + orderbook bullish + precio subiendo = SHORT.
+       Square bearish + orderbook bearish + precio cayendo = LONG.
+    5. El rechazo YA está confirmado por la divergencia misma; no se espera confirmación adicional.
 
     Args:
         symbol: Par, ej. 'RAYUSDT'
         square_bias: 'bullish' | 'bearish' | 'neutral' según posts recientes de Square
-        square_note: Resumen de 1 línea de lo visto en Square (ej. '3 posts whale accumulation')
+        square_note: Resumen de 1 línea de Square (ej. '3 posts whale accumulation')
+        side: 'LONG' o 'SHORT' para leer la decisión direccional correspondiente
 
     Returns:
-        Veredicto FINAL ENTER/WAIT/AVOID con score /100, traza por fuente y vetos.
+        Veredicto FINAL LONG/SHORT con score /100, traza por fuente y vetos.
         Si hay contradicción entre fuentes NO existe 'entrada parcial': es WAIT o AVOID.
     """
     symbol = symbol.upper()
     if not symbol.endswith("USDT"):
         symbol += "USDT"
-    return confluence_decision(symbol, square_bias, square_note)
+    return confluence_decision(symbol, square_bias, square_note, side)
 
 @mcp.tool()
 def approve_trade_tool(
