@@ -157,32 +157,73 @@ def get_open_orders(symbol: str | None = None) -> dict:
         "by_symbol": symbols,
     }
 
-def get_all_usdt_tickers(min_volume: float = 5_000_000) -> list:
-    r = requests.get(f"{BASE_URL}/api/v3/ticker/24hr", timeout=15)
+FUTURES_STABLES = ("USDC", "FDUSD", "TUSD", "DAI", "USDP", "AEUR", "EUR")
+
+def _pub_base(market: str) -> str:
+    return FUTURES_BASE if (market or "spot") == "futures" else BASE_URL
+
+def _is_junk(sym: str) -> bool:
+    if any(x in sym for x in ["UPUSDT", "DOWNUSDT", "BULL", "BEAR"]):
+        return True
+    if sym.endswith("USDT") and sym[:-4] in FUTURES_STABLES:
+        return True
+    return False
+
+def get_all_usdt_tickers(min_volume: float = 5_000_000, market: str = "futures") -> list:
+    base = _pub_base(market)
+    path = "/fapi/v1/ticker/24hr" if market == "futures" else "/api/v3/ticker/24hr"
+    r = requests.get(f"{base}{path}", timeout=15)
     r.raise_for_status()
     data = r.json()
     return [
         d for d in data
         if d["symbol"].endswith("USDT")
-        and float(d["quoteVolume"]) > min_volume
-        and not any(x in d["symbol"] for x in ["UP", "DOWN", "BULL", "BEAR"])
+        and float(d.get("quoteVolume", 0) or 0) > min_volume
+        and not _is_junk(d["symbol"])
     ]
 
-def get_klines(symbol: str, interval: str = "1d", limit: int = 14) -> list:
+def get_klines(symbol: str, interval: str = "1d", limit: int = 14, market: str = "futures") -> list:
+    base = _pub_base(market)
+    path = "/fapi/v1/klines" if market == "futures" else "/api/v3/klines"
     r = requests.get(
-        f"{BASE_URL}/api/v3/klines",
+        f"{base}{path}",
         params={"symbol": symbol, "interval": interval, "limit": limit},
         timeout=15
     )
     r.raise_for_status()
     return r.json()
 
-def get_orderbook_bias(symbol: str, depth: int = 20) -> dict | None:
+def get_funding(symbol: str) -> dict | None:
+    """Funding rate del perp (solo futures, público). Contrarian: funding muy
+    positivo = longs hacinados pagando (viento en contra para LONG, a favor de SHORT)."""
+    try:
+        r = requests.get(f"{FUTURES_BASE}/fapi/v1/premiumIndex",
+                         params={"symbol": symbol.upper()}, timeout=10)
+        r.raise_for_status()
+        d = r.json()
+        rate = float(d.get("lastFundingRate", d.get("fundingRate", 0)) or 0)
+        apr = rate * 3 * 365 * 100
+        if rate >= 0.001:
+            read = "longs hacinados pagando (EN CONTRA de LONG)"
+        elif rate <= -0.001:
+            read = "shorts hacinados pagando (EN CONTRA de SHORT)"
+        elif abs(rate) >= 0.0005:
+            read = "funding elevado, precaución"
+        else:
+            read = "funding neutro"
+        return {"rate": rate, "rate_pct": round(rate * 100, 4),
+                "apr_pct": round(apr, 1), "read": read}
+    except Exception:
+        return None
+
+def get_orderbook_bias(symbol: str, depth: int = 20, market: str = "futures") -> dict | None:
     """Lee el orderbook público y devuelve sesgo cuantificado (no narrativa).
     imbalance = (bids - asks) / (bids + asks) en top N niveles:
     > +0.05 a favor comprador, < -0.05 a favor vendedor."""
+    base = _pub_base(market)
+    path = "/fapi/v1/depth" if market == "futures" else "/api/v3/depth"
     try:
-        r = requests.get(f"{BASE_URL}/api/v3/depth",
+        r = requests.get(f"{base}{path}",
                          params={"symbol": symbol, "limit": min(max(depth, 5), 100)},
                          timeout=10)
         r.raise_for_status()
@@ -219,7 +260,8 @@ def _leverage_cap(wallet: float) -> int:
 
 def approve_trade(symbol: str, side: str, entry_price: float, leverage: float,
                   stop_loss: float, wallet_usdt: float, quantity: float,
-                  square_bias: str = "neutral", square_note: str = "") -> dict:
+                  square_bias: str = "neutral", square_note: str = "",
+                  market: str = "futures") -> dict:
     """TODO EN UNO: puerta final antes de abrir. Corre confluencia + matemática
     de riesgo. Solo devuelve APPROVED si TODO pasa; si no, REJECTED con motivos.
     La IA no interpreta: obedece."""
@@ -233,8 +275,8 @@ def approve_trade(symbol: str, side: str, entry_price: float, leverage: float,
         if not ok:
             fails.append(name)
 
-    # 1) Confluencia (momentum + orderbook + square + lado solicitado)
-    conf = confluence_decision(sym, square_bias, square_note, side)
+    # 1) Confluencia (momentum + orderbook + funding + square + lado solicitado)
+    conf = confluence_decision(sym, square_bias, square_note, side, market)
     side_decision = conf["side_decision"].get(side, {})
     check("confluence_enter",
           side_decision.get("final") == "ENTER",
@@ -268,7 +310,7 @@ def approve_trade(symbol: str, side: str, entry_price: float, leverage: float,
     # 6) SL fuera del ruido (≥1.5x rango promedio 15m)
     noise_ok, noise_detail = False, "sin datos"
     try:
-        ks = get_klines(sym, "15m", 17)
+        ks = get_klines(sym, "15m", 17, market)
         ranges = [(float(k[2]) - float(k[3])) / float(k[4]) * 100 for k in ks if float(k[4]) > 0]
         avg_noise = sum(ranges) / len(ranges) if ranges else 0
         noise_ok = sl_dist_pct >= avg_noise * 1.5
@@ -315,7 +357,8 @@ def approve_trade(symbol: str, side: str, entry_price: float, leverage: float,
     }
 
 def confluence_decision(symbol: str, square_bias: str = "neutral",
-                        square_note: str = "", side: str = "LONG") -> dict:
+                        square_note: str = "", side: str = "LONG",
+                        market: str = "futures") -> dict:
     """Combina 3 fuentes con reglas FIJAS y vetos. Ninguna fuente decide sola:
     - Momentum (scanner propio): 40 pts
     - Orderbook (medido aquí, no interpretado): 35 pts
@@ -337,16 +380,16 @@ def confluence_decision(symbol: str, square_bias: str = "neutral",
         problems.append("SÍMBOLO NO ESTÁNDAR: verifícalo en el exchange antes de operar")
 
     # 1) Momentum (scanner propio, determinista)
-    intra = get_intraday_momentum(sym)
+    intra = get_intraday_momentum(sym, market)
     mom_entry, mom_score, mom_detail = "AVOID", 0, None
     if intra is None:
         mom_detail = "sin datos intradía"
     else:
         try:
-            ks = get_klines(sym, "1d", 8)
+            ks = get_klines(sym, "1d", 8, market)
             daily = calc_daily_changes(ks)
             streak = analyze_bullish_streak(daily, ks)
-            t = get_ticker_detail(sym)
+            t = get_ticker_detail(sym, market)
             chg24 = float(t["priceChangePercent"])
             sv = safety_verdict(chg24, intra["dist_from_4h_high_pct"])
             ed = entry_decision(streak["positive_streak"], streak["net_change_pct"],
@@ -364,7 +407,7 @@ def confluence_decision(symbol: str, square_bias: str = "neutral",
             mom_detail = f"error momentum: {e}"
 
     # 2) Orderbook (medido aquí)
-    ob = get_orderbook_bias(sym)
+    ob = get_orderbook_bias(sym, 20, market)
     ob_score_long = 0
     ob_score_short = 0
     if ob is None:
@@ -381,6 +424,10 @@ def confluence_decision(symbol: str, square_bias: str = "neutral",
         sq = "neutral"
     sq_score_long = {"bullish": 25, "neutral": 12, "bearish": 0}[sq]
     sq_score_short = {"bearish": 25, "neutral": 12, "bullish": 0}[sq]
+
+    # 3b) Funding (solo futures; contrarian puro: extremos = multitud hacinada)
+    funding = get_funding(sym) if market == "futures" else None
+    fund_rate = (funding or {}).get("rate", 0) or 0
 
     # 4) Rechazo de LONG antes de calcular el veredicto direccional.
     long_rejection = detect_rejection(intra, ob_detail if isinstance(ob_detail, dict) else None, sq, mom_entry)
@@ -402,6 +449,8 @@ def confluence_decision(symbol: str, square_bias: str = "neutral",
         long_vetoes.append(long_rejection["reason"])
     if mom_entry == "WAIT":
         long_vetoes.append("momentum WAIT (sin ENTER): orderbook y Square no pueden autorizar solas")
+    if fund_rate >= 0.001:
+        long_vetoes.append(f"funding extremo long-side ({fund_rate:.4%}): multitud LONG hacinada pagando")
 
     if long_vetoes or score_long < 70:
         if mom_entry == "AVOID" or (sq == "bearish" and mom_entry != "ENTER") or long_rejection["detected"]:
@@ -421,6 +470,8 @@ def confluence_decision(symbol: str, square_bias: str = "neutral",
         short_vetoes.append("orderbook no disponible para confirmar SHORT")
     elif isinstance(ob_detail, dict) and ob_detail["spread_pct"] > 0.30:
         short_vetoes.append(f"spread {ob_detail['spread_pct']}%: impuesto microcap, no entrada a mercado")
+    if fund_rate <= -0.001:
+        short_vetoes.append(f"funding extremo short-side ({fund_rate:.4%}): multitud SHORT hacinada pagando")
 
     if short_vetoes or score_short < 70:
         short_final, short_size = "WAIT", "0% - esperar confirmación SHORT"
@@ -455,6 +506,7 @@ def confluence_decision(symbol: str, square_bias: str = "neutral",
             "momentum_40": {"score": mom_score, "detail": mom_detail},
             "orderbook_35": {"score": ob_score_long, "detail": ob_detail},
             "square_25": {"bias": sq, "score": sq_score_long, "note": square_note},
+            "funding": funding or {"note": "n/a en spot"},
             "rejection": long_rejection,
             "short_trace": {
                 "momentum_score": mom_score_short,
@@ -486,11 +538,11 @@ def calc_daily_changes(klines: list) -> list:
         changes.append(round(pct, 2))
     return changes
 
-def get_intraday_momentum(symbol: str) -> dict | None:
+def get_intraday_momentum(symbol: str, market: str = "futures") -> dict | None:
     """Momentum intradía real: cambio 1h y 4h + spike de volumen (velas 15m).
     Filtro principal: detecta lo que se mueve AHORA, no ayer."""
     try:
-        ks = get_klines(symbol, "15m", 17)
+        ks = get_klines(symbol, "15m", 17, market)
     except Exception:
         return None
     if len(ks) < 17:
@@ -727,17 +779,18 @@ def scan_market(
     min_24h_pct: float = 0.0,
     only_positive: bool = True,
     include_watchlist: bool = True,
+    market: str = "futures",
 ) -> list:
-    """HIBRIDO en 2 etapas + nivel WATCH para lista extensa:
+    """HIBRIDO en 2 etapas + nivel WATCH para lista extensa (universo FUTUROS default):
     1. PUERTA intradía (1 request 15m x17 por moneda): solo lo que se mueve AHORA.
     2. RANKING por racha diaria (1 request 1d x8 solo para las que pasan):
        consistencia primero, velocidad después. Neto 7d negativo hunde rebotes
        de desplome al fondo. Incluye veredicto de seguridad por moneda.
-    3. ENRIQUECIMIENTO TOP: orderbook + rechazo/toma de ganancias + Square
-       neutral por defecto. Si el precio cae con intención/book LONG o el book
+    3. ENRIQUECIMIENTO TOP: orderbook + funding + rechazo/toma de ganancias +
+       Square neutral por defecto. Si el precio cae con intención/book LONG o el book
        se vuelve vendedor contra momentum ENTER, se bloquea LONG y se sugiere SHORT.
     """
-    tickers = get_all_usdt_tickers(min_volume)
+    tickers = get_all_usdt_tickers(min_volume, market)
     gated = []
 
     for i, t in enumerate(tickers):
@@ -748,7 +801,7 @@ def scan_market(
         if only_positive and pct_24h < min_24h_pct:
             continue
 
-        intra = get_intraday_momentum(sym)
+        intra = get_intraday_momentum(sym, market)
         if intra is None:
             continue
 
@@ -783,7 +836,7 @@ def scan_market(
     results = []
     for sym, pct_24h, vol, intra, tier in gated:
         try:
-            ks = get_klines(sym, "1d", 8)
+            ks = get_klines(sym, "1d", 8, market)
             if len(ks) < 8:
                 continue
             daily = calc_daily_changes(ks)
@@ -829,7 +882,9 @@ def scan_market(
 
     # Enrichment top only
     for c in top:
-        ob = get_orderbook_bias(c["symbol"])
+        ob = get_orderbook_bias(c["symbol"], 20, market)
+        fund = get_funding(c["symbol"]) if market == "futures" else None
+        c["funding"] = fund or {"note": "n/a en spot"}
         rejection = detect_rejection(
             {"chg_1h": c["chg_1h"], "chg_4h": c["chg_4h"], "price": c["price"]},
             ob,
@@ -857,6 +912,9 @@ def scan_market(
             vetoes.append(f"orderbook en contra (imb={imb})")
         if rejection["detected"]:
             vetoes.append(rejection["reason"])
+        fr = (fund or {}).get("rate", 0) or 0
+        if fr >= 0.001:
+            vetoes.append(f"funding extremo long-side ({fr:.4%}): multitud LONG hacinada")
         if ob["spread_pct"] > 0.30:
             vetoes.append(f"spread {ob['spread_pct']}%")
         if vetoes or score < 70:
@@ -914,13 +972,15 @@ def scan_market(
 
     return top
 
-def get_ticker_detail(symbol: str) -> dict:
-    r = requests.get(f"{BASE_URL}/api/v3/ticker/24hr", params={"symbol": symbol}, timeout=10)
+def get_ticker_detail(symbol: str, market: str = "futures") -> dict:
+    base = _pub_base(market)
+    path = "/fapi/v1/ticker/24hr" if market == "futures" else "/api/v3/ticker/24hr"
+    r = requests.get(f"{base}{path}", params={"symbol": symbol}, timeout=10)
     r.raise_for_status()
     return r.json()
 
-def get_klines_detailed(symbol: str, interval: str = "1d", limit: int = 14) -> list:
-    klines = get_klines(symbol, interval, limit)
+def get_klines_detailed(symbol: str, interval: str = "1d", limit: int = 14, market: str = "futures") -> list:
+    klines = get_klines(symbol, interval, limit, market)
     result = []
     for k in klines:
         o, h, l, c, v = float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])

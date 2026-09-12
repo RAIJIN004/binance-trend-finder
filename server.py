@@ -32,9 +32,11 @@ def scan_extensive_movements(
     min_24h_pct: float = 0.0,
     only_positive: bool = True,
     include_watchlist: bool = True,
+    market: str = "futures",
 ) -> dict:
     """
-    TODO-EN-UNO scan of Binance USDT pairs. Each coin in top_coins carries:
+    TODO-EN-UNO scan of Binance USDT pairs (FUTUROS default, tu mercado real).
+    Each coin in top_coins carries:
     momentum (1h/4h/spike/streak/net7d) + entry signal + pullback plan +
     orderbook bias + confluence_base (final/score/vetoes, Square assumed neutral) +
     rejection/toma_de_ganancias + MY ACCOUNT (my_position/my_orders/already_involved per coin).
@@ -55,6 +57,7 @@ def scan_extensive_movements(
         only_positive: If True, only rising coins (default: True)
         include_watchlist: If True, append WATCH tier (right direction, not all
             gates passed: 1h>=0.8%, 4h>=0.5%, spike>=0.7x) for a longer list (default: True)
+        market: 'futures' (default, perps USDT-M + funding) o 'spot'
 
     Returns:
         Dictionary with hybrid-ranked movers. Every coin carries an automatic
@@ -70,6 +73,7 @@ def scan_extensive_movements(
         min_24h_pct=min_24h_pct,
         only_positive=only_positive,
         include_watchlist=include_watchlist,
+        market=market,
     )
 
     return {
@@ -99,6 +103,7 @@ def scan_extensive_movements(
             "min_vol_spike": min_vol_spike,
             "min_24h_pct": min_24h_pct,
             "include_watchlist": include_watchlist,
+            "market": market,
         },
         "pairs_matched": len(results),
         "top_coins": results,
@@ -111,13 +116,14 @@ def scan_extensive_movements(
     }
 
 @mcp.tool()
-def get_coin_analysis(symbol: str) -> dict:
+def get_coin_analysis(symbol: str, market: str = "futures") -> dict:
     """
     Get detailed analysis of a specific coin's bullish momentum, ATR and streaks.
-    
+
     Args:
         symbol: Trading pair symbol (e.g., 'BTCUSDT', 'NEARUSDT')
-    
+        market: 'futures' (default) o 'spot'
+
     Returns:
         Detailed price data, daily green/red streaks, net 7d gain, and ATR
     """
@@ -125,10 +131,10 @@ def get_coin_analysis(symbol: str) -> dict:
     if not symbol.endswith("USDT"):
         symbol += "USDT"
 
-    ticker = get_ticker_detail(symbol)
-    klines_raw = get_klines_detailed(symbol, "1d", 14)
+    ticker = get_ticker_detail(symbol, market)
+    klines_raw = get_klines_detailed(symbol, "1d", 14, market)
     klines_data = [[0, k["open"], k["high"], k["low"], k["close"]] for k in klines_raw]
-    intraday = get_intraday_momentum(symbol)
+    intraday = get_intraday_momentum(symbol, market)
 
     atr_info = calc_atr(klines_data, period=14)
     daily_changes = [k["change_pct"] for k in klines_raw[-8:]]
@@ -207,9 +213,10 @@ def confluence_check(
     square_bias: str = "neutral",
     square_note: str = "",
     side: str = "LONG",
+    market: str = "futures",
 ) -> dict:
     """
-    DECISIÓN FINAL antes de operar: combina momentum + orderbook + Square con
+    DECISIÓN FINAL antes de operar: combina momentum + orderbook + funding + Square con
     reglas fijas y vetos. Esta es la ÚNICA tool que autoriza entradas.
 
     Cómo usarla (la IA debe seguir este orden):
@@ -227,6 +234,7 @@ def confluence_check(
         square_bias: 'bullish' | 'bearish' | 'neutral' según posts recientes de Square
         square_note: Resumen de 1 línea de Square (ej. '3 posts whale accumulation')
         side: 'LONG' o 'SHORT' para leer la decisión direccional correspondiente
+        market: 'futures' (default, +funding) o 'spot'
 
     Returns:
         Veredicto FINAL LONG/SHORT con score /100, traza por fuente y vetos.
@@ -235,7 +243,7 @@ def confluence_check(
     symbol = symbol.upper()
     if not symbol.endswith("USDT"):
         symbol += "USDT"
-    return confluence_decision(symbol, square_bias, square_note, side)
+    return confluence_decision(symbol, square_bias, square_note, side, market)
 
 @mcp.tool()
 def approve_trade_tool(
@@ -247,7 +255,8 @@ def approve_trade_tool(
     wallet_usdt: float,
     quantity: float,
     square_bias: str = "neutral",
-    square_note: str = ""
+    square_note: str = "",
+    market: str = "futures"
 ) -> dict:
     """
     PUERTA FINAL TODO-EN-UNO antes de abrir CUALQUIER posición. La IA debe
@@ -267,13 +276,14 @@ def approve_trade_tool(
         quantity: Cantidad en unidades base
         square_bias: 'bullish' | 'bearish' | 'neutral' (de binance-square)
         square_note: Nota de 1 línea de Square
+        market: 'futures' (default) o 'spot'
 
     Returns:
         APPROVED (luz verde matemática) o REJECTED (no abrir, con motivos).
         REJECTED no admite apelación narrativa.
     """
     return approve_trade(symbol, side, entry_price, leverage, stop_loss,
-                         wallet_usdt, quantity, square_bias, square_note)
+                         wallet_usdt, quantity, square_bias, square_note, market)
 
 @mcp.tool()
 def show_positions() -> dict:
